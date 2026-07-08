@@ -1,0 +1,45 @@
+# Python caches and local tooling
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Secrets and local Azure/OpenAI config
+openai_config.json
+azure_config.json
+*.key
+*.pem
+
+# Local/curated data sources
+Curated_Mutation_Dataset.xlsx
+*.xlsx
+*.xls
+
+# Generated pipeline outputs
+data/raw_bioc/
+data/passages/
+data/extractions/
+data/token_spend.csv
+data/run_report.json
+data/pmids.json
+data/pmids_with_results.csv
+
+# Local notebooks and scratch outputs
+.ipynb_checkpoints/
+*.log
+*.tmp
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

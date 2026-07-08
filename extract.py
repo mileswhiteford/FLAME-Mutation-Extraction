@@ -1,0 +1,508 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import instructor
+from instructor.core.client import HookName
+import pandas as pd
+from openai import AzureOpenAI
+from pydantic import BaseModel, Field
+
+
+class Mutation(BaseModel):
+    flu_segment: str | None = Field(
+        description="Influenza genome segment, such as HA, NA, PB1, PB2, PA, NP, M, or NS"
+    )
+    mutation: str | None = Field(description="Amino-acid mutation in X111Y format")
+    virus_type: str | None = Field(
+        description="Virus strain or subtype experimentally tested"
+    )
+    host_range: str | None = Field(
+        description="Host species or host range associated with the experiment"
+    )
+    phenotype: str | None = Field(
+        description="Experimentally observed phenotype associated with the mutation"
+    )
+
+
+class ExtractionSchema(BaseModel):
+    mutation_records: list[Mutation] = Field(
+        description=(
+            "Every distinct experimentally tested mutation-phenotype relationship related to"
+            "host adaptationin the source text"
+        )
+    )
+
+
+class UsageTotals(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_prompt_tokens: int = 0
+    response_count: int = 0
+
+
+PROMPT_TEMPLATE = """You are extracting experimentally tested influenza mutation-phenotype relationships from a research paper.
+Extract every distinct relationship related to host adaptation supported by the text.
+For each record, extract the flu segment, amino-acid mutation in X111Y format, virus type tested, host range, and phenotype.
+Create separate records when any of those values differ.
+Extract ONLY what is supported by the text below.
+If a field is not present, use null rather than guessing.
+Do not infer an amino-acid mutation from a nucleotide change unless the amino-acid consequence is explicitly stated.
+Only report mutation information that is novel to the paper; do not report mutation information that is being referred from an outside source such as a referenced paper or previous studies.
+There should be absolutely no duplicate entries.
+
+--- SOURCE TEXT ---
+{content}
+"""
+
+
+def load_config(config_path: Path | None) -> dict[str, Any]:
+    if config_path is None:
+        return {}
+    with config_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def config_value(
+    config: dict[str, Any],
+    keys: list[str],
+    env_names: list[str],
+    label: str,
+) -> str:
+    for key in keys:
+        value = config.get(key)
+        if value:
+            return str(value)
+
+    for env_name in env_names:
+        value = os.getenv(env_name)
+        if value:
+            return value
+
+    raise RuntimeError(
+        f"Missing {label}. Add one of {keys} to your config JSON "
+        f"or set one of {env_names}."
+    )
+
+
+def create_client(config: dict[str, Any]) -> instructor.Instructor:
+    azure_client = AzureOpenAI(
+        api_key=config_value(
+            config,
+            ["api_key", "subscription_key", "azure_openai_api_key"],
+            ["AZURE_OPENAI_API_KEY"],
+            "Azure OpenAI API key",
+        ),
+        azure_endpoint=config_value(
+            config,
+            ["endpoint", "endpoint_url", "azure_endpoint", "azure_openai_endpoint"],
+            ["AZURE_OPENAI_ENDPOINT"],
+            "Azure OpenAI endpoint",
+        ),
+        api_version=config_value(
+            config,
+            ["api_version", "azure_openai_api_version"],
+            ["AZURE_OPENAI_API_VERSION"],
+            "Azure OpenAI API version",
+        ),
+    )
+    return instructor.from_openai(azure_client)
+
+
+def deployment_from_config(config: dict[str, Any], cli_deployment: str | None) -> str:
+    if cli_deployment:
+        return cli_deployment
+    return config_value(
+        config,
+        ["deployment", "deployment_name", "azure_openai_deployment"],
+        ["AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
+        "Azure OpenAI deployment",
+    )
+
+
+def load_passage_payload(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def source_text_from_passage_file(path: Path, max_chars: int | None = None) -> str:
+    payload = load_passage_payload(path)
+    text = payload.get("combined_results_text")
+    if not text:
+        text = "\n\n".join(
+            passage.get("text", "")
+            for passage in payload.get("passages", [])
+            if passage.get("text")
+        )
+
+    text = text.strip()
+    if max_chars is not None and len(text) > max_chars:
+        text = text[:max_chars]
+    return text
+
+
+def value_from(obj: Any, key: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def collect_usage_from_response(response: Any, totals: UsageTotals) -> None:
+    usage = value_from(response, "usage")
+    if usage is None:
+        return
+
+    prompt_tokens = int(value_from(usage, "prompt_tokens", 0) or 0)
+    completion_tokens = int(value_from(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(value_from(usage, "total_tokens", 0) or 0)
+
+    completion_details = value_from(usage, "completion_tokens_details")
+    prompt_details = value_from(usage, "prompt_tokens_details")
+    reasoning_tokens = int(value_from(completion_details, "reasoning_tokens", 0) or 0)
+    cached_prompt_tokens = int(value_from(prompt_details, "cached_tokens", 0) or 0)
+
+    totals.prompt_tokens += prompt_tokens
+    totals.completion_tokens += completion_tokens
+    totals.total_tokens += total_tokens
+    totals.reasoning_tokens += reasoning_tokens
+    totals.cached_prompt_tokens += cached_prompt_tokens
+    totals.response_count += 1
+
+
+def attach_usage_tracker(client: instructor.Instructor) -> UsageTotals:
+    totals = UsageTotals()
+    client.on(
+        HookName.COMPLETION_RESPONSE,
+        lambda response: collect_usage_from_response(response, totals),
+    )
+    return totals
+
+
+def token_cost(config: dict[str, Any], key: str) -> float:
+    value = config.get(key, 0)
+    if value in (None, ""):
+        return 0.0
+    return float(value)
+
+
+def read_running_totals(spend_csv: Path) -> tuple[int, int, int, float]:
+    if not spend_csv.exists():
+        return 0, 0, 0, 0.0
+
+    with spend_csv.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    if not rows:
+        return 0, 0, 0, 0.0
+
+    last = rows[-1]
+    return (
+        int(float(last.get("running_prompt_tokens") or 0)),
+        int(float(last.get("running_completion_tokens") or 0)),
+        int(float(last.get("running_total_tokens") or 0)),
+        float(last.get("running_cost_usd") or 0.0),
+    )
+
+
+def append_spend_row(
+    spend_csv: Path,
+    *,
+    pmid: str,
+    passage_file: Path,
+    deployment: str,
+    status: str,
+    record_count: int,
+    usage: UsageTotals,
+    config: dict[str, Any],
+    max_tokens: int,
+    reasoning_effort: str,
+    max_chars: int | None,
+    max_retries: int,
+    error: Exception | None = None,
+) -> dict[str, Any]:
+    prompt_cost_per_token = token_cost(config, "prompt_token_cost")
+    completion_cost_per_token = token_cost(config, "completion_token_cost")
+    prompt_cost = usage.prompt_tokens * prompt_cost_per_token
+    completion_cost = usage.completion_tokens * completion_cost_per_token
+    total_cost = prompt_cost + completion_cost
+
+    (
+        running_prompt_tokens,
+        running_completion_tokens,
+        running_total_tokens,
+        running_cost,
+    ) = read_running_totals(spend_csv)
+
+    row = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "pmid": pmid,
+        "passage_file": str(passage_file),
+        "deployment": deployment,
+        "status": status,
+        "record_count": record_count,
+        "response_count": usage.response_count,
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "cached_prompt_tokens": usage.cached_prompt_tokens,
+        "total_tokens": usage.total_tokens,
+        "prompt_cost_usd": f"{prompt_cost:.8f}",
+        "completion_cost_usd": f"{completion_cost:.8f}",
+        "total_cost_usd": f"{total_cost:.8f}",
+        "running_prompt_tokens": running_prompt_tokens + usage.prompt_tokens,
+        "running_completion_tokens": running_completion_tokens
+        + usage.completion_tokens,
+        "running_total_tokens": running_total_tokens + usage.total_tokens,
+        "running_cost_usd": f"{running_cost + total_cost:.8f}",
+        "prompt_token_cost": prompt_cost_per_token,
+        "completion_token_cost": completion_cost_per_token,
+        "max_completion_tokens": max_tokens,
+        "reasoning_effort": reasoning_effort,
+        "max_chars": max_chars,
+        "max_retries": max_retries,
+        "error_type": type(error).__name__ if error else "",
+        "error_message": str(error).replace("\n", " ")[:1000] if error else "",
+    }
+
+    spend_csv.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not spend_csv.exists()
+    with spend_csv.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+    return row
+
+
+def extract_from_text(
+    client: instructor.Instructor,
+    deployment: str,
+    content: str,
+    max_tokens: int,
+    max_retries: int,
+    reasoning_effort: str | None,
+) -> ExtractionSchema:
+    kwargs: dict[str, Any] = {}
+    if reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
+
+    return client.chat.completions.create(
+        model=deployment,
+        max_completion_tokens=max_tokens,
+        max_retries=max_retries,
+        response_model=ExtractionSchema,
+        messages=[
+            {
+                "role": "user",
+                "content": PROMPT_TEMPLATE.format(content=content),
+            }
+        ],
+        **kwargs,
+    )
+
+
+def extraction_rows(pmid: str, extraction: ExtractionSchema) -> list[dict[str, Any]]:
+    rows = []
+    for record in extraction.mutation_records:
+        row = {"pmid": pmid}
+        row.update(record.model_dump())
+        rows.append(row)
+    return rows
+
+
+def save_outputs(rows: list[dict[str, Any]], output_csv: Path, output_json: Path) -> None:
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+
+    columns = [
+        "pmid",
+        "flu_segment",
+        "mutation",
+        "virus_type",
+        "host_range",
+        "phenotype",
+    ]
+    df = pd.DataFrame(rows, columns=columns)
+    df.to_csv(output_csv, index=False)
+
+    with output_json.open("w", encoding="utf-8") as handle:
+        json.dump(rows, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+
+
+def default_passage_path(pmid: str) -> Path:
+    return Path("data") / "passages" / f"{pmid}.json"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extract influenza mutation-phenotype records from Results passages."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("openai_config.json"),
+        help=(
+            "Path to Azure OpenAI config JSON. Defaults to openai_config.json. "
+            "Expected keys: subscription_key, endpoint_url, api_version, deployment."
+        ),
+    )
+    parser.add_argument(
+        "--pmid",
+        default="23750226",
+        help="PMID to extract from data/passages/{pmid}.json.",
+    )
+    parser.add_argument(
+        "--passage-file",
+        type=Path,
+        default=None,
+        help="Optional explicit passage JSON file. Overrides --pmid path lookup.",
+    )
+    parser.add_argument(
+        "--deployment",
+        default=None,
+        help="Azure OpenAI deployment name. Overrides the config JSON value.",
+    )
+    parser.add_argument(
+        "--output-csv",
+        type=Path,
+        default=None,
+        help="CSV output path. Defaults to data/extractions/{pmid}_mutations.csv.",
+    )
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        default=None,
+        help="JSON output path. Defaults to data/extractions/{pmid}_mutations.json.",
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=60000,
+        help="Maximum Results text characters to send for this initial test.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=8000,
+        help=(
+            "Maximum completion tokens, including hidden reasoning tokens, "
+            "for the extraction response."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=["none", "low", "medium", "high"],
+        default="low",
+        help=(
+            "Azure GPT-5 reasoning effort. Use low to reduce hidden reasoning "
+            "tokens; use none to omit the parameter."
+        ),
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="Instructor retry count for schema validation failures.",
+    )
+    parser.add_argument(
+        "--spend-csv",
+        type=Path,
+        default=Path("data") / "token_spend.csv",
+        help="Append token and cost tracking rows to this CSV.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    config_path = args.config if args.config.exists() else None
+    config = load_config(config_path)
+    deployment = deployment_from_config(config, args.deployment)
+
+    passage_file = args.passage_file or default_passage_path(args.pmid)
+    output_csv = args.output_csv or (
+        Path("data") / "extractions" / f"{args.pmid}_mutations.csv"
+    )
+    output_json = args.output_json or (
+        Path("data") / "extractions" / f"{args.pmid}_mutations.json"
+    )
+
+    content = source_text_from_passage_file(passage_file, max_chars=args.max_chars)
+    if not content:
+        raise RuntimeError(f"No Results text found in {passage_file}")
+
+    client = create_client(config)
+    usage = attach_usage_tracker(client)
+    reasoning_effort = (
+        None if args.reasoning_effort == "none" else args.reasoning_effort
+    )
+
+    rows: list[dict[str, Any]] = []
+    try:
+        extraction = extract_from_text(
+            client=client,
+            deployment=deployment,
+            content=content,
+            max_tokens=args.max_tokens,
+            max_retries=args.max_retries,
+            reasoning_effort=reasoning_effort,
+        )
+        rows = extraction_rows(args.pmid, extraction)
+        save_outputs(rows, output_csv, output_json)
+    except Exception as exc:
+        spend_row = append_spend_row(
+            args.spend_csv,
+            pmid=args.pmid,
+            passage_file=passage_file,
+            deployment=deployment,
+            status="failed",
+            record_count=0,
+            usage=usage,
+            config=config,
+            max_tokens=args.max_tokens,
+            reasoning_effort=args.reasoning_effort,
+            max_chars=args.max_chars,
+            max_retries=args.max_retries,
+            error=exc,
+        )
+        print(f"Spend CSV: {args.spend_csv}")
+        print(f"This run cost: ${spend_row['total_cost_usd']}")
+        print(f"Running total: ${spend_row['running_cost_usd']}")
+        raise
+
+    spend_row = append_spend_row(
+        args.spend_csv,
+        pmid=args.pmid,
+        passage_file=passage_file,
+        deployment=deployment,
+        status="success",
+        record_count=len(rows),
+        usage=usage,
+        config=config,
+        max_tokens=args.max_tokens,
+        reasoning_effort=args.reasoning_effort,
+        max_chars=args.max_chars,
+        max_retries=args.max_retries,
+    )
+
+    print(f"Extracted {len(rows)} mutation records for PMID {args.pmid}")
+    print(f"CSV: {output_csv}")
+    print(f"JSON: {output_json}")
+    print(f"Spend CSV: {args.spend_csv}")
+    print(f"This run cost: ${spend_row['total_cost_usd']}")
+    print(f"Running total: ${spend_row['running_cost_usd']}")
+
+
+if __name__ == "__main__":
+    main()
