@@ -16,19 +16,21 @@ from pydantic import BaseModel, Field
 
 
 class Mutation(BaseModel):
-    flu_segment: str | None = Field(
-        description="Influenza genome segment, such as HA, NA, PB1, PB2, PA, NP, M, or NS"
-    )
-    mutation: str | None = Field(description="Amino-acid mutation in X111Y format")
-    virus_type: str | None = Field(
-        description="Virus strain or subtype experimentally tested"
-    )
-    host_range: str | None = Field(
-        description="Host species or host range associated with the experiment"
-    )
-    phenotype: str | None = Field(
-        description="Experimentally observed phenotype associated with the mutation"
-    )
+    strain: str | None = Field(
+        description="Virus strain/backbone experimentally tested")
+    subtype: str | None = Field(
+        description="Virus subtype, such as H1N1 or H5N1")
+    protein: str | None = Field(
+        description="Influenza genome segment, such as HA, NA, PB1, PB2, PA, NP, M, or NS")
+    mutation: list[str] = Field(
+        description="Amino-acid mutation in X111Y format")
+    phenotypes: list[str] = Field(
+        description="Relevant mammalian host-adaptation phenotypes observed in the same experiment")
+    cell_type: str | None = Field(
+        description="Cell type used in the experiment to test the mutation, if applicable, such as MDCK, A549, or 293T")
+    animal_model: str | None = Field(
+        description="Animal model used in the experiment to test the mutation, if applicable. Use specific lineage if known, such as BALB/c")
+    
 
 
 class ExtractionSchema(BaseModel):
@@ -50,14 +52,30 @@ class UsageTotals(BaseModel):
 
 
 PROMPT_TEMPLATE = """You are extracting experimentally tested influenza mutation-phenotype relationships from a research paper.
-Extract every distinct relationship related to host adaptation supported by the text.
-For each record, extract the flu segment, amino-acid mutation in X111Y format, virus type tested, host range, and phenotype.
-Create separate records when any of those values differ.
-Extract ONLY what is supported by the text below.
-If a field is not present, use null rather than guessing.
-Do not infer an amino-acid mutation from a nucleotide change unless the amino-acid consequence is explicitly stated.
-Only report mutation information that is novel to the paper; do not report mutation information that is being referred from an outside source such as a referenced paper or previous studies.
-There should be absolutely no duplicate entries.
+
+MUTATION EXTRACTION RULES:
+- Only extract mutations that relate to mammalian host adaptation.
+- Do not extract general virulence-only outcomes such as increased virulence, weight loss, mortality, morbidity, or pathogenicity.
+- Do not report mutations that had no observed effect.
+- If the same experiment reports multiple relevant host-adaptation phenotypes for the same mutation or mutation combination, create one record and put each phenotype in the phenotypes list.
+- If an experiment tests multiple mutations together and reports the phenotype of the combined mutant, create one record with all tested amino-acid mutations in the mutation list. Do not split combined-mutant phenotypes into separate single-mutation records unless the text separately reports effects for the individual mutations.
+- Create a different record for each distinct experiment, including different cell type, animal model, viral backbone, strain, subtype, assay, or experimental system.
+- Extract only experimentally tested relationships from this paper.
+- Do not extract background claims, literature review claims, or mutations cited from previous studies.
+- For each record, extract tested strain/backbone, subtype, protein, amino-acid mutation list, phenotype list, cell type, and animal model.
+- Do not extract PMID or PMCID from the source text; those identifiers are added separately from pipeline metadata.
+- Use the mutation field as a list of amino-acid mutations in X111Y format, such as ["E627K"] or ["G590S", "Q591R"].
+- Use the phenotypes field as a list of experimentally observed mammalian host-adaptation phenotypes from the same experiment.
+- Use cell_type for in-vitro or ex-vivo cell systems, such as MDCK, A549, 293T, Calu-3, or primary cells.
+- Use animal_model for in-vivo animal systems, including the specific lineage or strain when stated, such as BALB/c mice, ferrets, guinea pigs, or swine.
+- Put strain/backbone in strain, such as A/Zhejiang/DTID-ZJU01/2013 or A/turkey/Egypt/AR1507/2016.
+- Put subtype in subtype, such as H1N1, H3N2, H5N1, or H7N9.
+- Put the influenza protein or segment in protein, such as PB2, PB1, PA, HA, NA, NP, M, NS.
+- Extract ONLY what is supported by the text below.
+- If a nullable field is not present, use null rather than guessing.
+- If a list field has no supported values, use an empty list rather than guessing.
+- Do not infer an amino-acid mutation from a nucleotide change unless the amino-acid consequence is explicitly stated.
+- There should be absolutely no duplicate entries.
 
 --- SOURCE TEXT ---
 {content}
@@ -133,8 +151,23 @@ def load_passage_payload(path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
-def source_text_from_passage_file(path: Path, max_chars: int | None = None) -> str:
-    payload = load_passage_payload(path)
+def pmcid_from_passage_payload(payload: dict[str, Any]) -> str | None:
+    for document in payload.get("documents", []):
+        pmcid = document.get("pmc_id")
+        if pmcid:
+            return str(pmcid)
+
+    for passage in payload.get("passages", []):
+        pmcid = passage.get("pmc_id")
+        if pmcid:
+            return str(pmcid)
+
+    return None
+
+
+def source_text_from_passage_payload(
+    payload: dict[str, Any], max_chars: int | None = None
+) -> str:
     text = payload.get("combined_results_text")
     if not text:
         text = "\n\n".join(
@@ -147,6 +180,12 @@ def source_text_from_passage_file(path: Path, max_chars: int | None = None) -> s
     if max_chars is not None and len(text) > max_chars:
         text = text[:max_chars]
     return text
+
+
+def source_text_from_passage_file(path: Path, max_chars: int | None = None) -> str:
+    return source_text_from_passage_payload(
+        load_passage_payload(path), max_chars=max_chars
+    )
 
 
 def value_from(obj: Any, key: str, default: Any = None) -> Any:
@@ -311,10 +350,12 @@ def extract_from_text(
     )
 
 
-def extraction_rows(pmid: str, extraction: ExtractionSchema) -> list[dict[str, Any]]:
+def extraction_rows(
+    pmid: str, pmcid: str | None, extraction: ExtractionSchema
+) -> list[dict[str, Any]]:
     rows = []
     for record in extraction.mutation_records:
-        row = {"pmid": pmid}
+        row = {"pmid": pmid, "pmcid": pmcid}
         row.update(record.model_dump())
         rows.append(row)
     return rows
@@ -326,11 +367,14 @@ def save_outputs(rows: list[dict[str, Any]], output_csv: Path, output_json: Path
 
     columns = [
         "pmid",
-        "flu_segment",
+        "pmcid",
+        "strain",
+        "subtype",
+        "protein",
         "mutation",
-        "virus_type",
-        "host_range",
-        "phenotype",
+        "phenotypes",
+        "cell_type",
+        "animal_model"
     ]
     df = pd.DataFrame(rows, columns=columns)
     df.to_csv(output_csv, index=False)
@@ -438,7 +482,12 @@ def main() -> None:
         Path("data") / "extractions" / f"{args.pmid}_mutations.json"
     )
 
-    content = source_text_from_passage_file(passage_file, max_chars=args.max_chars)
+    passage_payload = load_passage_payload(passage_file)
+    source_pmid = str(passage_payload.get("pmid") or args.pmid)
+    source_pmcid = pmcid_from_passage_payload(passage_payload)
+    content = source_text_from_passage_payload(
+        passage_payload, max_chars=args.max_chars
+    )
     if not content:
         raise RuntimeError(f"No Results text found in {passage_file}")
 
@@ -458,12 +507,12 @@ def main() -> None:
             max_retries=args.max_retries,
             reasoning_effort=reasoning_effort,
         )
-        rows = extraction_rows(args.pmid, extraction)
+        rows = extraction_rows(source_pmid, source_pmcid, extraction)
         save_outputs(rows, output_csv, output_json)
     except Exception as exc:
         spend_row = append_spend_row(
             args.spend_csv,
-            pmid=args.pmid,
+            pmid=source_pmid,
             passage_file=passage_file,
             deployment=deployment,
             status="failed",
@@ -483,7 +532,7 @@ def main() -> None:
 
     spend_row = append_spend_row(
         args.spend_csv,
-        pmid=args.pmid,
+        pmid=source_pmid,
         passage_file=passage_file,
         deployment=deployment,
         status="success",
@@ -496,7 +545,7 @@ def main() -> None:
         max_retries=args.max_retries,
     )
 
-    print(f"Extracted {len(rows)} mutation records for PMID {args.pmid}")
+    print(f"Extracted {len(rows)} mutation records for PMID {source_pmid}")
     print(f"CSV: {output_csv}")
     print(f"JSON: {output_json}")
     print(f"Spend CSV: {args.spend_csv}")
