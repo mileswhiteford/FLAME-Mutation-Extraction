@@ -77,6 +77,13 @@ MUTATION EXTRACTION RULES:
 - Do not infer an amino-acid mutation from a nucleotide change unless the amino-acid consequence is explicitly stated.
 - There should be absolutely no duplicate entries.
 
+SOURCE USAGE RULES:
+- Use the RESULTS TEXT section as the only source for mutation-phenotype claims.
+- Use the METHODS TEXT section only to fill experimental context fields such as strain/backbone, subtype, cell_type, animal_model, assay, or experimental system.
+- Do not create a mutation record from METHODS TEXT alone.
+- Do not add a phenotype from METHODS TEXT unless the same phenotype claim is supported in RESULTS TEXT.
+- If METHODS TEXT conflicts with RESULTS TEXT, keep the mutation and phenotype claim grounded in RESULTS TEXT and use METHODS TEXT only for clearly matching experimental context.
+
 --- SOURCE TEXT ---
 {content}
 """
@@ -165,18 +172,41 @@ def pmcid_from_passage_payload(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def source_text_from_passage_payload(
-    payload: dict[str, Any], max_chars: int | None = None
+def combined_section_text(
+    payload: dict[str, Any],
+    combined_key: str,
+    passages_key: str,
 ) -> str:
-    text = payload.get("combined_results_text")
-    if not text:
-        text = "\n\n".join(
-            passage.get("text", "")
-            for passage in payload.get("passages", [])
-            if passage.get("text")
-        )
+    text = payload.get(combined_key)
+    if text:
+        return str(text).strip()
 
-    text = text.strip()
+    return "\n\n".join(
+        passage.get("text", "")
+        for passage in payload.get(passages_key, [])
+        if passage.get("text")
+    ).strip()
+
+
+def source_text_from_passage_payload(
+    payload: dict[str, Any],
+    max_chars: int | None = None,
+    max_methods_chars: int | None = 15000,
+) -> str:
+    results_text = combined_section_text(
+        payload, "combined_results_text", "passages"
+    )
+    methods_text = combined_section_text(
+        payload, "combined_methods_text", "methods_passages"
+    )
+    if max_methods_chars is not None and len(methods_text) > max_methods_chars:
+        methods_text = methods_text[:max_methods_chars]
+
+    sections = [f"--- RESULTS TEXT ---\n{results_text}"]
+    if methods_text:
+        sections.append(f"--- METHODS TEXT ---\n{methods_text}")
+
+    text = "\n\n".join(sections).strip()
     if max_chars is not None and len(text) > max_chars:
         text = text[:max_chars]
     return text
@@ -253,6 +283,28 @@ def read_running_totals(spend_csv: Path) -> tuple[int, int, int, float]:
     )
 
 
+def spend_csv_fieldnames(spend_csv: Path, row: dict[str, Any]) -> list[str]:
+    new_fields = list(row.keys())
+    if not spend_csv.exists():
+        return new_fields
+
+    with spend_csv.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        existing_fields = reader.fieldnames or []
+        existing_rows = list(reader)
+
+    missing_fields = [field for field in new_fields if field not in existing_fields]
+    if not missing_fields:
+        return existing_fields
+
+    merged_fields = existing_fields + missing_fields
+    with spend_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=merged_fields)
+        writer.writeheader()
+        writer.writerows(existing_rows)
+    return merged_fields
+
+
 def append_spend_row(
     spend_csv: Path,
     *,
@@ -266,6 +318,7 @@ def append_spend_row(
     max_tokens: int,
     reasoning_effort: str,
     max_chars: int | None,
+    max_methods_chars: int | None,
     max_retries: int,
     error: Exception | None = None,
 ) -> dict[str, Any]:
@@ -308,6 +361,7 @@ def append_spend_row(
         "max_completion_tokens": max_tokens,
         "reasoning_effort": reasoning_effort,
         "max_chars": max_chars,
+        "max_methods_chars": max_methods_chars,
         "max_retries": max_retries,
         "error_type": type(error).__name__ if error else "",
         "error_message": str(error).replace("\n", " ")[:1000] if error else "",
@@ -315,8 +369,9 @@ def append_spend_row(
 
     spend_csv.parent.mkdir(parents=True, exist_ok=True)
     write_header = not spend_csv.exists()
+    fieldnames = spend_csv_fieldnames(spend_csv, row)
     with spend_csv.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         if write_header:
             writer.writeheader()
         writer.writerow(row)
@@ -390,7 +445,7 @@ def default_passage_path(pmid: str) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extract influenza mutation-phenotype records from Results passages."
+        description="Extract influenza mutation-phenotype records from Results plus Methods context."
     )
     parser.add_argument(
         "--config",
@@ -432,8 +487,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-chars",
         type=int,
-        default=60000,
-        help="Maximum Results text characters to send for this initial test.",
+        default=None,
+        help=(
+            "Optional maximum labeled Results plus Methods source characters to "
+            "send. Defaults to no truncation."
+        ),
+    )
+    parser.add_argument(
+        "--max-methods-chars",
+        type=int,
+        default=None,
+        help="Optional maximum Methods characters to include. Defaults to no truncation.",
     )
     parser.add_argument(
         "--max-tokens",
@@ -485,11 +549,40 @@ def main() -> None:
     passage_payload = load_passage_payload(passage_file)
     source_pmid = str(passage_payload.get("pmid") or args.pmid)
     source_pmcid = pmcid_from_passage_payload(passage_payload)
+    results_chars = len(
+        combined_section_text(passage_payload, "combined_results_text", "passages")
+    )
+    methods_chars = len(
+        combined_section_text(
+            passage_payload, "combined_methods_text", "methods_passages"
+        )
+    )
+    source_without_total_cap = source_text_from_passage_payload(
+        passage_payload,
+        max_chars=None,
+        max_methods_chars=args.max_methods_chars,
+    )
     content = source_text_from_passage_payload(
-        passage_payload, max_chars=args.max_chars
+        passage_payload,
+        max_chars=args.max_chars,
+        max_methods_chars=args.max_methods_chars,
     )
     if not content:
         raise RuntimeError(f"No Results text found in {passage_file}")
+
+    print(f"Results characters available: {results_chars}")
+    print(f"Methods characters available: {methods_chars}")
+    if args.max_methods_chars is not None and methods_chars > args.max_methods_chars:
+        print(
+            "WARNING: Methods text was truncated by "
+            f"--max-methods-chars={args.max_methods_chars}."
+        )
+    if args.max_chars is not None and len(source_without_total_cap) > args.max_chars:
+        print(
+            "WARNING: Combined source text was truncated by "
+            f"--max-chars={args.max_chars}."
+        )
+    print(f"Characters sent to model: {len(content)}")
 
     client = create_client(config)
     usage = attach_usage_tracker(client)
@@ -522,6 +615,7 @@ def main() -> None:
             max_tokens=args.max_tokens,
             reasoning_effort=args.reasoning_effort,
             max_chars=args.max_chars,
+            max_methods_chars=args.max_methods_chars,
             max_retries=args.max_retries,
             error=exc,
         )
@@ -542,6 +636,7 @@ def main() -> None:
         max_tokens=args.max_tokens,
         reasoning_effort=args.reasoning_effort,
         max_chars=args.max_chars,
+        max_methods_chars=args.max_methods_chars,
         max_retries=args.max_retries,
     )
 

@@ -17,6 +17,7 @@ BIOC_API_TEMPLATE = (
     "BioC_json/{pmid}/unicode"
 )
 RESULTS_SECTION_TYPE = "RESULTS"
+METHODS_SECTION_TYPE = "METHODS"
 
 
 def normalize_pmid_token(token: Any) -> str | None:
@@ -133,18 +134,20 @@ def iter_bioc_documents(payload: Any) -> list[dict[str, Any]]:
 def extract_results_passages(pmid: str, payload: Any) -> dict[str, Any]:
     documents = iter_bioc_documents(payload)
     extracted_documents: list[dict[str, Any]] = []
-    passages: list[dict[str, Any]] = []
+    results_passages: list[dict[str, Any]] = []
+    methods_passages: list[dict[str, Any]] = []
 
     for document in documents:
         pmc_id = document.get("id")
-        document_passages: list[dict[str, Any]] = []
+        document_results_passages: list[dict[str, Any]] = []
+        document_methods_passages: list[dict[str, Any]] = []
         for passage in document.get("passages", []):
             if not isinstance(passage, dict):
                 continue
 
             infons = passage.get("infons") or {}
             section_type = str(infons.get("section_type", "")).upper()
-            if section_type != RESULTS_SECTION_TYPE:
+            if section_type not in {RESULTS_SECTION_TYPE, METHODS_SECTION_TYPE}:
                 continue
 
             passage_record = {
@@ -156,14 +159,20 @@ def extract_results_passages(pmid: str, payload: Any) -> dict[str, Any]:
                 "offset": passage.get("offset"),
                 "text": passage.get("text", ""),
             }
-            passages.append(passage_record)
-            document_passages.append(passage_record)
+            if section_type == RESULTS_SECTION_TYPE:
+                results_passages.append(passage_record)
+                document_results_passages.append(passage_record)
+            elif section_type == METHODS_SECTION_TYPE:
+                methods_passages.append(passage_record)
+                document_methods_passages.append(passage_record)
 
         extracted_documents.append(
             {
                 "pmc_id": pmc_id,
-                "passage_count": len(document_passages),
-                "passages": document_passages,
+                "passage_count": len(document_results_passages),
+                "methods_passage_count": len(document_methods_passages),
+                "passages": document_results_passages,
+                "methods_passages": document_methods_passages,
             }
         )
 
@@ -171,11 +180,16 @@ def extract_results_passages(pmid: str, payload: Any) -> dict[str, Any]:
         "pmid": pmid,
         "source": "PMC BioC",
         "document_count": len(documents),
-        "passage_count": len(passages),
+        "passage_count": len(results_passages),
+        "methods_passage_count": len(methods_passages),
         "documents": extracted_documents,
-        "passages": passages,
+        "passages": results_passages,
+        "methods_passages": methods_passages,
         "combined_results_text": "\n\n".join(
-            passage["text"] for passage in passages if passage.get("text")
+            passage["text"] for passage in results_passages if passage.get("text")
+        ),
+        "combined_methods_text": "\n\n".join(
+            passage["text"] for passage in methods_passages if passage.get("text")
         ),
     }
 
@@ -235,6 +249,7 @@ def run_pipeline(
             "pmid": pmid,
             "pmc_ids": [document.get("id") for document in documents],
             "passage_count": extracted["passage_count"],
+            "methods_passage_count": extracted["methods_passage_count"],
         }
         report["successes"].append(success_record)
 
@@ -250,7 +265,7 @@ def run_pipeline(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Fetch PMC BioC articles by PMID and save Results-only passages."
+        description="Fetch PMC BioC articles by PMID and save Results plus Methods passages."
     )
     parser.add_argument(
         "--sheet",

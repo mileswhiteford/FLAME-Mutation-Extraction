@@ -83,8 +83,11 @@ class ResultsExtractionTests(unittest.TestCase):
         extracted = extract_results_passages("23750226", payload)
 
         self.assertEqual(extracted["passage_count"], 1)
+        self.assertEqual(extracted["methods_passage_count"], 1)
         self.assertEqual(extracted["passages"][0]["text"], "Results text")
+        self.assertEqual(extracted["methods_passages"][0]["text"], "Methods text")
         self.assertEqual(extracted["combined_results_text"], "Results text")
+        self.assertEqual(extracted["combined_methods_text"], "Methods text")
 
 
 if __name__ == "__main__":
