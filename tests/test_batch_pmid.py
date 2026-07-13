@@ -6,6 +6,7 @@ from batch_pmid import (
     ordered_unique_pmids,
     split_pmid_cell,
 )
+from extract import is_content_block_error, optional_float_config
 
 
 class PmidParsingTests(unittest.TestCase):
@@ -88,6 +89,37 @@ class ResultsExtractionTests(unittest.TestCase):
         self.assertEqual(extracted["methods_passages"][0]["text"], "Methods text")
         self.assertEqual(extracted["combined_results_text"], "Results text")
         self.assertEqual(extracted["combined_methods_text"], "Methods text")
+
+
+class ExtractFallbackTests(unittest.TestCase):
+    def test_detects_content_block_errors(self):
+        error = RuntimeError(
+            "Error code: 400 - ResponsibleAIPolicyViolation: "
+            "request blocked by content filter"
+        )
+
+        self.assertTrue(is_content_block_error(error))
+
+    def test_detects_invalid_prompt_safety_block(self):
+        error = RuntimeError(
+            "Error code: 400 - {'error': {'message': \"Invalid prompt: "
+            "we've limited access to this content for safety reasons.\", "
+            "'code': 'invalid_prompt'}}"
+        )
+
+        self.assertTrue(is_content_block_error(error))
+
+    def test_does_not_treat_generic_bad_request_as_content_block(self):
+        error = RuntimeError(
+            "Error code: 400 - Unrecognized request argument supplied: "
+            "reasoning_effort"
+        )
+
+        self.assertFalse(is_content_block_error(error))
+
+    def test_optional_float_config(self):
+        self.assertEqual(optional_float_config({"temperature": "0.0"}, "temperature"), 0.0)
+        self.assertIsNone(optional_float_config({}, "temperature"))
 
 
 if __name__ == "__main__":

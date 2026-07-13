@@ -15,6 +15,7 @@ env/
 
 # Secrets and local Azure/OpenAI config
 openai_config.json
+openai4_config.json
 azure_config.json
 *.key
 *.pem
@@ -25,13 +26,7 @@ Curated_Mutation_Dataset.xlsx
 *.xls
 
 # Generated pipeline outputs
-data/raw_bioc/
-data/passages/
-data/extractions/
-data/token_spend.csv
-data/run_report.json
-data/pmids.json
-data/pmids_with_results.csv
+data/*
 
 # Local notebooks and scratch outputs
 .ipynb_checkpoints/

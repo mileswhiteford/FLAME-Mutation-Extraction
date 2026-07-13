@@ -20,17 +20,20 @@ class Mutation(BaseModel):
         description="Virus strain/backbone experimentally tested")
     subtype: str | None = Field(
         description="Virus subtype, such as H1N1 or H5N1")
-    protein: str | None = Field(
-        description="Influenza genome segment, such as HA, NA, PB1, PB2, PA, NP, M, or NS")
-    mutation: list[str] = Field(
-        description="Amino-acid mutation in X111Y format")
+    proteins: list[str] | None = Field(
+        description="Influenza genome segments, such as HA, NA, PB1, PB2, PA, NP, M, or NS")
+    mutations: list[str] = Field(
+        description="Amino-acid mutations in Protein-X111Y format, such as PB2-E627K or HA-N122D. Use Protein-X111Δ for deletions and Protein-Δ111Y for insertions. Use a list for multiple mutations tested together in the same experiment.")
     phenotypes: list[str] = Field(
         description="Relevant mammalian host-adaptation phenotypes observed in the same experiment")
     cell_type: str | None = Field(
         description="Cell type used in the experiment to test the mutation, if applicable, such as MDCK, A549, or 293T")
     animal_model: str | None = Field(
         description="Animal model used in the experiment to test the mutation, if applicable. Use specific lineage if known, such as BALB/c")
-    
+    receptor_substrates: list[str] = Field(
+        description="Receptor, glycan, or sialylglycopolymer substrates used in the experiment, such as SAα2,3Gal, SAα2,6Gal, 3'-SLN, 6'-SLN, or human/avian receptor analogs")
+    numbering: str | None = Field(
+        description="Amino-acid numbering scheme used in the source text, such as H3 or H1 numbering. Only use for HA and NA proteins. If not specified, use null.")
 
 
 class ExtractionSchema(BaseModel):
@@ -62,20 +65,27 @@ MUTATION EXTRACTION RULES:
 - Create a different record for each distinct experiment, including different cell type, animal model, viral backbone, strain, subtype, assay, or experimental system.
 - Extract only experimentally tested relationships from this paper.
 - Do not extract background claims, literature review claims, or mutations cited from previous studies.
-- For each record, extract tested strain/backbone, subtype, protein, amino-acid mutation list, phenotype list, cell type, and animal model.
+- For each record, extract tested strain/backbone, subtype, proteins, amino-acid mutations, phenotype list, cell type, animal model, receptor substrate list, and numbering scheme.
 - Do not extract PMID or PMCID from the source text; those identifiers are added separately from pipeline metadata.
-- Use the mutation field as a list of amino-acid mutations in X111Y format, such as ["E627K"] or ["G590S", "Q591R"].
+- Use the mutations field as a list of amino-acid mutations in Protein-X111Y format, such as ["PB2-E627K"] or ["HA-N122D", "NA-S189N"].
+- Format deletions as Protein-X111Δ, where X is the deleted amino acid and 111 is its position, such as HA-K130Δ.
+- Format insertions as Protein-Δ111Y, where Y is the inserted amino acid and 111 is the insertion position stated in the text, such as HA-Δ158K.
+- If a deletion or insertion is described but the exact amino acid or position is not explicitly stated, do not guess; use only the explicitly supported mutation notation.
 - Use the phenotypes field as a list of experimentally observed mammalian host-adaptation phenotypes from the same experiment.
 - Use cell_type for in-vitro or ex-vivo cell systems, such as MDCK, A549, 293T, Calu-3, or primary cells.
 - Use animal_model for in-vivo animal systems, including the specific lineage or strain when stated, such as BALB/c mice, ferrets, guinea pigs, or swine.
+- Use receptor_substrates for receptor, glycan, or sialylglycopolymer substrates used in binding assays, such as SAα2,3Gal, SAα2,6Gal, 3'-SLN, 6'-SLN, or human/avian receptor analogs.
+- Do not put receptor substrates or glycan analogs in cell_type or animal_model.
 - Put strain/backbone in strain, such as A/Zhejiang/DTID-ZJU01/2013 or A/turkey/Egypt/AR1507/2016.
 - Put subtype in subtype, such as H1N1, H3N2, H5N1, or H7N9.
-- Put the influenza protein or segment in protein, such as PB2, PB1, PA, HA, NA, NP, M, NS.
-- Extract ONLY what is supported by the text below.
+- Put the influenza protein or segment in proteins, such as PB2, PB1, PA, HA, NA, NP, M, NS. If multiple proteins are tested together, use a list of proteins.
+- Put the amino-acid numbering scheme in numbering, such as H3 or H1 numbering. Only use for HA and NA proteins. If not specified, use null.
 - If a nullable field is not present, use null rather than guessing.
 - If a list field has no supported values, use an empty list rather than guessing.
 - Do not infer an amino-acid mutation from a nucleotide change unless the amino-acid consequence is explicitly stated.
-- There should be absolutely no duplicate entries.
+- There should be ABSOLUTELY NO duplicate entries.
+- Extract ONLY what is supported by the text below.
+
 
 SOURCE USAGE RULES:
 - Use the RESULTS TEXT section as the only source for mutation-phenotype claims.
@@ -139,7 +149,7 @@ def create_client(config: dict[str, Any]) -> instructor.Instructor:
             "Azure OpenAI API version",
         ),
     )
-    return instructor.from_openai(azure_client)
+    return instructor.from_openai(azure_client, mode=instructor.Mode.TOOLS_STRICT)
 
 
 def deployment_from_config(config: dict[str, Any], cli_deployment: str | None) -> str:
@@ -264,6 +274,39 @@ def token_cost(config: dict[str, Any], key: str) -> float:
     return float(value)
 
 
+def optional_float_config(config: dict[str, Any], key: str) -> float | None:
+    value = config.get(key)
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+def is_content_block_error(error: Exception) -> bool:
+    text = str(error).lower()
+    block_indicators = [
+        "content_filter",
+        "content filter",
+        "contentfilter",
+        "content policy",
+        "content management policy",
+        "responsibleaipolicyviolation",
+        "policy violation",
+        "safety system",
+        "safety reasons",
+        "limited access to this content",
+        "invalid prompt",
+        "invalid_prompt",
+    ]
+    if any(indicator in text for indicator in block_indicators):
+        return True
+    return "content" in text and (
+        "blocked" in text
+        or "filtered" in text
+        or "limited access" in text
+        or "safety" in text
+    )
+
+
 def read_running_totals(spend_csv: Path) -> tuple[int, int, int, float]:
     if not spend_csv.exists():
         return 0, 0, 0, 0.0
@@ -385,10 +428,13 @@ def extract_from_text(
     max_tokens: int,
     max_retries: int,
     reasoning_effort: str | None,
+    temperature: float | None,
 ) -> ExtractionSchema:
     kwargs: dict[str, Any] = {}
     if reasoning_effort:
         kwargs["reasoning_effort"] = reasoning_effort
+    if temperature is not None:
+        kwargs["temperature"] = temperature
 
     return client.chat.completions.create(
         model=deployment,
@@ -425,11 +471,13 @@ def save_outputs(rows: list[dict[str, Any]], output_csv: Path, output_json: Path
         "pmcid",
         "strain",
         "subtype",
-        "protein",
-        "mutation",
+        "proteins",
+        "mutations",
         "phenotypes",
         "cell_type",
-        "animal_model"
+        "animal_model",
+        "receptor_substrates",
+        "numbering"
     ]
     df = pd.DataFrame(rows, columns=columns)
     df.to_csv(output_csv, index=False)
@@ -454,6 +502,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Path to Azure OpenAI config JSON. Defaults to openai_config.json. "
             "Expected keys: subscription_key, endpoint_url, api_version, deployment."
+        ),
+    )
+    parser.add_argument(
+        "--fallback-config",
+        type=Path,
+        default=Path("openai4_config.json"),
+        help=(
+            "Fallback Azure OpenAI config used only when the primary request is "
+            "blocked by a content filter. Defaults to openai4_config.json."
         ),
     )
     parser.add_argument(
@@ -537,6 +594,7 @@ def main() -> None:
     config_path = args.config if args.config.exists() else None
     config = load_config(config_path)
     deployment = deployment_from_config(config, args.deployment)
+    temperature = optional_float_config(config, "temperature")
 
     passage_file = args.passage_file or default_passage_path(args.pmid)
     output_csv = args.output_csv or (
@@ -589,6 +647,11 @@ def main() -> None:
     reasoning_effort = (
         None if args.reasoning_effort == "none" else args.reasoning_effort
     )
+    final_deployment = deployment
+    final_config = config
+    final_usage = usage
+    final_reasoning_effort_label = args.reasoning_effort
+    used_fallback = False
 
     rows: list[dict[str, Any]] = []
     try:
@@ -599,48 +662,167 @@ def main() -> None:
             max_tokens=args.max_tokens,
             max_retries=args.max_retries,
             reasoning_effort=reasoning_effort,
+            temperature=temperature,
         )
         rows = extraction_rows(source_pmid, source_pmcid, extraction)
         save_outputs(rows, output_csv, output_json)
     except Exception as exc:
-        spend_row = append_spend_row(
-            args.spend_csv,
-            pmid=source_pmid,
-            passage_file=passage_file,
-            deployment=deployment,
-            status="failed",
-            record_count=0,
-            usage=usage,
-            config=config,
-            max_tokens=args.max_tokens,
-            reasoning_effort=args.reasoning_effort,
-            max_chars=args.max_chars,
-            max_methods_chars=args.max_methods_chars,
-            max_retries=args.max_retries,
-            error=exc,
-        )
-        print(f"Spend CSV: {args.spend_csv}")
-        print(f"This run cost: ${spend_row['total_cost_usd']}")
-        print(f"Running total: ${spend_row['running_cost_usd']}")
-        raise
+        content_blocked = is_content_block_error(exc)
+        fallback_config = None
+        fallback_deployment = None
+        if content_blocked and args.fallback_config.exists():
+            fallback_config = load_config(args.fallback_config)
+            fallback_deployment = deployment_from_config(fallback_config, None)
+
+        if content_blocked and fallback_config and fallback_deployment != deployment:
+            spend_row = append_spend_row(
+                args.spend_csv,
+                pmid=source_pmid,
+                passage_file=passage_file,
+                deployment=deployment,
+                status="content_blocked_fallback",
+                record_count=0,
+                usage=usage,
+                config=config,
+                max_tokens=args.max_tokens,
+                reasoning_effort=args.reasoning_effort,
+                max_chars=args.max_chars,
+                max_methods_chars=args.max_methods_chars,
+                max_retries=args.max_retries,
+                error=exc,
+            )
+            print(
+                "WARNING: Primary deployment was blocked by content filtering: "
+                f"{deployment}"
+            )
+            print(
+                "WARNING: Retrying once with fallback config: "
+                f"{args.fallback_config}"
+            )
+            print(f"Primary attempt cost: ${spend_row['total_cost_usd']}")
+
+            fallback_temperature = optional_float_config(
+                fallback_config, "temperature"
+            )
+            fallback_client = create_client(fallback_config)
+            fallback_usage = attach_usage_tracker(fallback_client)
+            try:
+                extraction = extract_from_text(
+                    client=fallback_client,
+                    deployment=fallback_deployment,
+                    content=content,
+                    max_tokens=args.max_tokens,
+                    max_retries=args.max_retries,
+                    reasoning_effort=None,
+                    temperature=fallback_temperature,
+                )
+                rows = extraction_rows(source_pmid, source_pmcid, extraction)
+                save_outputs(rows, output_csv, output_json)
+            except Exception as fallback_exc:
+                fallback_spend_row = append_spend_row(
+                    args.spend_csv,
+                    pmid=source_pmid,
+                    passage_file=passage_file,
+                    deployment=fallback_deployment,
+                    status="failed",
+                    record_count=0,
+                    usage=fallback_usage,
+                    config=fallback_config,
+                    max_tokens=args.max_tokens,
+                    reasoning_effort="none",
+                    max_chars=args.max_chars,
+                    max_methods_chars=args.max_methods_chars,
+                    max_retries=args.max_retries,
+                    error=fallback_exc,
+                )
+                print(f"Spend CSV: {args.spend_csv}")
+                print(
+                    "Fallback attempt cost: "
+                    f"${fallback_spend_row['total_cost_usd']}"
+                )
+                print(f"Running total: ${fallback_spend_row['running_cost_usd']}")
+                raise
+
+            final_deployment = fallback_deployment
+            final_config = fallback_config
+            final_usage = fallback_usage
+            final_reasoning_effort_label = "none"
+            used_fallback = True
+        elif content_blocked:
+            print(
+                "WARNING: Primary deployment was blocked by content filtering, "
+                "but no distinct fallback deployment was available: "
+                f"{args.fallback_config}"
+            )
+            spend_row = append_spend_row(
+                args.spend_csv,
+                pmid=source_pmid,
+                passage_file=passage_file,
+                deployment=deployment,
+                status="failed",
+                record_count=0,
+                usage=usage,
+                config=config,
+                max_tokens=args.max_tokens,
+                reasoning_effort=args.reasoning_effort,
+                max_chars=args.max_chars,
+                max_methods_chars=args.max_methods_chars,
+                max_retries=args.max_retries,
+                error=exc,
+            )
+            print(f"Spend CSV: {args.spend_csv}")
+            print(f"This run cost: ${spend_row['total_cost_usd']}")
+            print(f"Running total: ${spend_row['running_cost_usd']}")
+            raise
+        else:
+            spend_row = append_spend_row(
+                args.spend_csv,
+                pmid=source_pmid,
+                passage_file=passage_file,
+                deployment=deployment,
+                status="failed",
+                record_count=0,
+                usage=usage,
+                config=config,
+                max_tokens=args.max_tokens,
+                reasoning_effort=args.reasoning_effort,
+                max_chars=args.max_chars,
+                max_methods_chars=args.max_methods_chars,
+                max_retries=args.max_retries,
+                error=exc,
+            )
+            print(f"Spend CSV: {args.spend_csv}")
+            print(f"This run cost: ${spend_row['total_cost_usd']}")
+            print(f"Running total: ${spend_row['running_cost_usd']}")
+            raise
 
     spend_row = append_spend_row(
         args.spend_csv,
         pmid=source_pmid,
         passage_file=passage_file,
-        deployment=deployment,
+        deployment=final_deployment,
         status="success",
         record_count=len(rows),
-        usage=usage,
-        config=config,
+        usage=final_usage,
+        config=final_config,
         max_tokens=args.max_tokens,
-        reasoning_effort=args.reasoning_effort,
+        reasoning_effort=final_reasoning_effort_label,
         max_chars=args.max_chars,
         max_methods_chars=args.max_methods_chars,
         max_retries=args.max_retries,
     )
 
     print(f"Extracted {len(rows)} mutation records for PMID {source_pmid}")
+    if used_fallback:
+        print(
+            "WARNING: Final output was generated with fallback deployment: "
+            f"{final_deployment}"
+        )
+    else:
+        print(
+            "Final output was generated with primary deployment: "
+            f"{final_deployment}"
+        )
     print(f"CSV: {output_csv}")
     print(f"JSON: {output_json}")
     print(f"Spend CSV: {args.spend_csv}")
