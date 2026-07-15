@@ -16,21 +16,23 @@ from pydantic import BaseModel, Field
 
 
 class Mutation(BaseModel):
-    strain: str | None = Field(
+    backbone: str | None = Field(
         description="Virus strain/backbone experimentally tested")
+    recombinants: list[str] | None = Field(
+        description="Recombinant virus strain(s)/backbone(s) experimentally tested, if applicable")
     subtype: str | None = Field(
         description="Virus subtype, such as H1N1 or H5N1")
     proteins: list[str] | None = Field(
         description="Influenza genome segments, such as HA, NA, PB1, PB2, PA, NP, M, or NS")
-    mutations: list[str] = Field(
+    mutations: list[str] | None = Field(
         description="Amino-acid mutations in Protein-X111Y format, such as PB2-E627K or HA-N122D. Use Protein-X111Δ for deletions and Protein-Δ111Y for insertions. Use a list for multiple mutations tested together in the same experiment.")
-    phenotypes: list[str] = Field(
+    phenotypes: list[str] | None= Field(
         description="Relevant mammalian host-adaptation phenotypes observed in the same experiment")
     cell_type: str | None = Field(
         description="Cell type used in the experiment to test the mutation, if applicable, such as MDCK, A549, or 293T")
     animal_model: str | None = Field(
         description="Animal model used in the experiment to test the mutation, if applicable. Use specific lineage if known, such as BALB/c")
-    receptor_substrates: list[str] = Field(
+    receptor_substrates: list[str] | None= Field(
         description="Receptor, glycan, or sialylglycopolymer substrates used in the experiment, such as SAα2,3Gal, SAα2,6Gal, 3'-SLN, 6'-SLN, or human/avian receptor analogs")
     numbering: str | None = Field(
         description="Amino-acid numbering scheme used in the source text, such as H3 or H1 numbering. Only use for HA and NA proteins. If not specified, use null.")
@@ -39,8 +41,7 @@ class Mutation(BaseModel):
 class ExtractionSchema(BaseModel):
     mutation_records: list[Mutation] = Field(
         description=(
-            "Every distinct experimentally tested mutation-phenotype relationship related to"
-            "host adaptationin the source text"
+            "Every distinct experimentally tested mutation-phenotype relationship related to host adaptation in the source text"
         )
     )
 
@@ -65,7 +66,7 @@ MUTATION EXTRACTION RULES:
 - Create a different record for each distinct experiment, including different cell type, animal model, viral backbone, strain, subtype, assay, or experimental system.
 - Extract only experimentally tested relationships from this paper.
 - Do not extract background claims, literature review claims, or mutations cited from previous studies.
-- For each record, extract tested strain/backbone, subtype, proteins, amino-acid mutations, phenotype list, cell type, animal model, receptor substrate list, and numbering scheme.
+- For each record, extract tested strain/backbone, recombinant(s), subtype, proteins, amino-acid mutations, phenotype list, cell type, animal model, receptor substrate list, and numbering scheme.
 - Do not extract PMID or PMCID from the source text; those identifiers are added separately from pipeline metadata.
 - Use the mutations field as a list of amino-acid mutations in Protein-X111Y format, such as ["PB2-E627K"] or ["HA-N122D", "NA-S189N"].
 - Format deletions as Protein-X111Δ, where X is the deleted amino acid and 111 is its position, such as HA-K130Δ.
@@ -76,7 +77,8 @@ MUTATION EXTRACTION RULES:
 - Use animal_model for in-vivo animal systems, including the specific lineage or strain when stated, such as BALB/c mice, ferrets, guinea pigs, or swine.
 - Use receptor_substrates for receptor, glycan, or sialylglycopolymer substrates used in binding assays, such as SAα2,3Gal, SAα2,6Gal, 3'-SLN, 6'-SLN, or human/avian receptor analogs.
 - Do not put receptor substrates or glycan analogs in cell_type or animal_model.
-- Put strain/backbone in strain, such as A/Zhejiang/DTID-ZJU01/2013 or A/turkey/Egypt/AR1507/2016.
+- Put strain/backbone in backbone, such as A/Zhejiang/DTID-ZJU01/2013 or A/turkey/Egypt/AR1507/2016.
+- Put recombinant virus strain(s) and their corresponding proteins tested in recombinants, such as A/WSN/1933(HA) or A/Puerto Rico/8/1934(PB2). If multiple recombinants are tested together, use a list of recombinants.
 - Put subtype in subtype, such as H1N1, H3N2, H5N1, or H7N9.
 - Put the influenza protein or segment in proteins, such as PB2, PB1, PA, HA, NA, NP, M, NS. If multiple proteins are tested together, use a list of proteins.
 - Put the amino-acid numbering scheme in numbering, such as H3 or H1 numbering. Only use for HA and NA proteins. If not specified, use null.
@@ -469,7 +471,8 @@ def save_outputs(rows: list[dict[str, Any]], output_csv: Path, output_json: Path
     columns = [
         "pmid",
         "pmcid",
-        "strain",
+        "backbone",
+        "recombinants",
         "subtype",
         "proteins",
         "mutations",
