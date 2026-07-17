@@ -2,6 +2,8 @@ import unittest
 
 from batch_pmid import (
     extract_results_passages,
+    is_methods_source_passage,
+    is_results_source_passage,
     normalize_pmid_token,
     ordered_unique_pmids,
     split_pmid_cell,
@@ -75,6 +77,22 @@ class ResultsExtractionTests(unittest.TestCase):
                                 },
                                 "text": "Discussion text",
                             },
+                            {
+                                "offset": 4,
+                                "infons": {
+                                    "section_type": "FIG",
+                                    "type": "fig_caption",
+                                },
+                                "text": "Figure caption text",
+                            },
+                            {
+                                "offset": 5,
+                                "infons": {
+                                    "section_type": "TABLE",
+                                    "type": "table_caption",
+                                },
+                                "text": "Table caption text",
+                            },
                         ],
                     }
                 ]
@@ -83,12 +101,36 @@ class ResultsExtractionTests(unittest.TestCase):
 
         extracted = extract_results_passages("23750226", payload)
 
-        self.assertEqual(extracted["passage_count"], 1)
+        self.assertEqual(extracted["passage_count"], 2)
         self.assertEqual(extracted["methods_passage_count"], 1)
         self.assertEqual(extracted["passages"][0]["text"], "Results text")
+        self.assertEqual(extracted["passages"][1]["text"], "Figure caption text")
         self.assertEqual(extracted["methods_passages"][0]["text"], "Methods text")
-        self.assertEqual(extracted["combined_results_text"], "Results text")
+        self.assertEqual(
+            extracted["combined_results_text"],
+            "Results text\n\nFigure caption text",
+        )
         self.assertEqual(extracted["combined_methods_text"], "Methods text")
+
+    def test_results_source_passages_include_figure_captions(self):
+        self.assertTrue(is_results_source_passage("RESULTS", "paragraph"))
+        self.assertTrue(is_results_source_passage("FIG", "fig_caption"))
+        self.assertTrue(is_results_source_passage("FIG", "fig_title_caption"))
+        self.assertTrue(
+            is_results_source_passage("DISCUSS", "paragraph", "Results/Discussion")
+        )
+        self.assertTrue(
+            is_results_source_passage("DISCUSS", "paragraph", "Discussion/Results")
+        )
+        self.assertFalse(is_results_source_passage("TABLE", "table_caption"))
+        self.assertFalse(is_results_source_passage("REF", "title_caption"))
+
+    def test_methods_source_passages_include_experimental_procedures(self):
+        self.assertTrue(is_methods_source_passage("METHODS"))
+        self.assertTrue(
+            is_methods_source_passage("DISCUSS", "Experimental Procedures")
+        )
+        self.assertFalse(is_methods_source_passage("DISCUSS", "Discussion"))
 
 
 class ExtractFallbackTests(unittest.TestCase):

@@ -18,6 +18,13 @@ BIOC_API_TEMPLATE = (
 )
 RESULTS_SECTION_TYPE = "RESULTS"
 METHODS_SECTION_TYPE = "METHODS"
+FIGURE_SECTION_TYPE = "FIG"
+FIGURE_CAPTION_TYPES = {"fig_caption", "fig_title_caption"}
+METHODS_SECTION_LABELS = {
+    "experimental procedures",
+    "materials and methods",
+    "methods",
+}
 
 
 def normalize_pmid_token(token: Any) -> str | None:
@@ -131,6 +138,41 @@ def iter_bioc_documents(payload: Any) -> list[dict[str, Any]]:
     return documents
 
 
+def normalized_section_label(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def is_mixed_results_discussion_label(label: str) -> bool:
+    return bool(
+        re.fullmatch(r"results?\s*/\s*discussion", label)
+        or re.fullmatch(r"discussion\s*/\s*results?", label)
+        or re.fullmatch(r"results?\s+and\s+discussion", label)
+        or re.fullmatch(r"discussion\s+and\s+results?", label)
+    )
+
+
+def is_results_source_passage(
+    section_type: str,
+    passage_type: Any,
+    section_label: Any = None,
+) -> bool:
+    section_label_text = normalized_section_label(section_label)
+    if section_type == RESULTS_SECTION_TYPE:
+        return True
+    if is_mixed_results_discussion_label(section_label_text):
+        return True
+    return (
+        section_type == FIGURE_SECTION_TYPE
+        and str(passage_type or "").lower() in FIGURE_CAPTION_TYPES
+    )
+
+
+def is_methods_source_passage(section_type: str, section_label: Any = None) -> bool:
+    if section_type == METHODS_SECTION_TYPE:
+        return True
+    return normalized_section_label(section_label) in METHODS_SECTION_LABELS
+
+
 def extract_results_passages(pmid: str, payload: Any) -> dict[str, Any]:
     documents = iter_bioc_documents(payload)
     extracted_documents: list[dict[str, Any]] = []
@@ -147,22 +189,26 @@ def extract_results_passages(pmid: str, payload: Any) -> dict[str, Any]:
 
             infons = passage.get("infons") or {}
             section_type = str(infons.get("section_type", "")).upper()
-            if section_type not in {RESULTS_SECTION_TYPE, METHODS_SECTION_TYPE}:
+            passage_type = infons.get("type")
+            section_label = infons.get("section")
+            if not is_results_source_passage(
+                section_type, passage_type, section_label
+            ) and not is_methods_source_passage(section_type, section_label):
                 continue
 
             passage_record = {
                 "pmid": pmid,
                 "pmc_id": pmc_id,
                 "section_type": section_type,
-                "passage_type": infons.get("type"),
-                "section": infons.get("section"),
+                "passage_type": passage_type,
+                "section": section_label,
                 "offset": passage.get("offset"),
                 "text": passage.get("text", ""),
             }
-            if section_type == RESULTS_SECTION_TYPE:
+            if is_results_source_passage(section_type, passage_type, section_label):
                 results_passages.append(passage_record)
                 document_results_passages.append(passage_record)
-            elif section_type == METHODS_SECTION_TYPE:
+            elif is_methods_source_passage(section_type, section_label):
                 methods_passages.append(passage_record)
                 document_methods_passages.append(passage_record)
 
