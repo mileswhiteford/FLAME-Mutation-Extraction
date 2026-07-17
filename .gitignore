@@ -13,15 +13,11 @@ env/
 .env
 .env.*
 
-# Secrets and local Azure/OpenAI config
-openai_config.json
-openai4_config.json
-azure_config.json
+# Secrets and local credentials
 *.key
 *.pem
 
 # Local/curated data sources
-Curated_Mutation_Dataset.xlsx
 *.xlsx
 *.xls
 
