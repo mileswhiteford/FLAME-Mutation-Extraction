@@ -340,7 +340,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sheet",
         type=Path,
-        default=Path("Curated_Mutation_Dataset.xlsx"),
         help="Path to the curated workbook containing a PMID column.",
     )
     parser.add_argument(

@@ -325,10 +325,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fallback-config",
         type=Path,
-        default=Path("openai4_config.json"),
+        default=Path("openai_config_fallback.json"),
         help=(
             "Fallback Azure OpenAI config used only when the primary request is "
-            "blocked by a content filter. Defaults to openai4_config.json."
+            "blocked by a content filter. Defaults to openai_config_fallback.json."
         ),
     )
     parser.add_argument(
