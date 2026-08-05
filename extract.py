@@ -36,7 +36,8 @@ class Mutation(BaseModel):
         description="Receptor, glycan, or sialylglycopolymer substrates used in the experiment, such as SAα2,3Gal, SAα2,6Gal, 3'-SLN, 6'-SLN, or human/avian receptor analogs")
     numbering: str | None = Field(
         description="Amino-acid numbering scheme used in the source text, such as H3 or H1 numbering. Only use for HA and NA proteins. If not specified, use null.")
-
+    temperature: str | None = Field(
+        description="Temperature of the experiment in the experimental system context, only if explicitly stated in the text. If not specified, use null.")
 
 class ExtractionSchema(BaseModel):
     mutation_records: list[Mutation] = Field(
@@ -46,56 +47,44 @@ class ExtractionSchema(BaseModel):
     )
 
 
-class UsageTotals(BaseModel):
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    reasoning_tokens: int = 0
-    cached_prompt_tokens: int = 0
-    response_count: int = 0
-
-
 PROMPT_TEMPLATE = """You are extracting experimentally tested influenza mutation-phenotype relationships from a research paper.
 
 MUTATION EXTRACTION RULES:
-- Only extract mutations that relate to mammalian host adaptation.
-- Do not extract general virulence-only outcomes such as increased virulence, weight loss, mortality, morbidity, or pathogenicity.
-- Do not report mutations that had no observed effect.
-- If the same experiment reports multiple relevant host-adaptation phenotypes for the same mutation or mutation combination, create one record for each individual phenotype described.
-- If an experiment tests multiple mutations together and reports the phenotype of the combined mutant, create one record with all tested amino-acid mutations in the mutation list. Do not split combined-mutant phenotypes into separate single-mutation records unless the text separately reports effects for the individual mutations.
-- Create a different record for each distinct experiment, including different cell type, animal model, viral backbone, strain, subtype, assay, or experimental system.
-- Extract only experimentally tested relationships from this paper.
-- Do not extract background claims, literature review claims, or mutations cited from previous studies.
-- For each record, extract tested strain/backbone, recombinant(s), subtype, proteins, amino-acid mutations, phenotype, cell type, animal model, receptor substrate list, and HA/NA numbering scheme (if applicable).
-- Do not extract PMID or PMCID from the source text; those identifiers are added separately from pipeline metadata.
-- Use the mutations field as a list of amino-acid mutations in Protein:X111Y format, such as ["PB2:E627K"] or ["HA:N122D", "NA:S189N"].
-- Format deletions as Protein:X111-, where X is the deleted amino acid and 111 is its position, such as HA:K130-.
-- Format insertions as Protein:-111Y, where Y is the inserted amino acid and 111 is the insertion position stated in the text, such as HA:-158K.
-- If a mutation, deletion, or insertion is described but the exact amino acid or position is not explicitly stated, do not guess; use only the explicitly supported mutation notation.
-- Use the phenotype field for the single experimentally observed mammalian host-adaptation phenotype from the same experiment.
-- Use cell_type for in-vitro or ex-vivo cell systems, such as MDCK, A549, 293T, Calu-3, or primary cells.
-- Use animal_model for in-vivo animal systems, including the specific lineage or strain when stated, such as BALB/c mice, ferrets, guinea pigs, or swine.
-- Use receptor_substrates for receptor, glycan, or sialylglycopolymer substrates used in binding assays, such as SAα2,3Gal, SAα2,6Gal, 3'-SLN, 6'-SLN, or human/avian receptor analogs.
-- Do not put receptor substrates or glycan analogs in cell_type or animal_model.
-- Each record should describe one experimental system type: in vitro/ex vivo cells, in vivo animals, or receptor-binding substrates.
-- Put strain/backbone in backbone, such as A/Zhejiang/DTID-ZJU01/2013 or A/turkey/Egypt/AR1507/2016.
-- Put recombinant virus strain(s) and their corresponding proteins tested in recombinants, such as A/WSN/1933(HA) or A/Puerto Rico/8/1934(PB2). If multiple recombinants are tested together, use a list of recombinants.
-- Put subtype in subtype, such as H1N1, H3N2, H5N1, or H7N9. If recombinants of different subtypes are tested together, such as an HA from H5N1 and an NA from H3N2, record the corresponding HA/NA types as the subtype only when HA and NA origins are explicit, in this case H5N2
-- Put the influenza protein or segment in proteins, such as PB2, PB1, PA, HA, NA, NP, M, NS. If multiple proteins are tested together, use a list of proteins.
-- Put the amino-acid numbering scheme in numbering, such as H3 or H1 numbering. Only use for HA and NA proteins. If not specified, use null.
-- If a nullable field is not present, use null rather than guessing.
-- If a list field has no supported values, use null rather than guessing.
-- Do not infer an amino-acid mutation from a nucleotide change unless the amino-acid consequence is explicitly stated.
-- There should be ABSOLUTELY NO duplicate entries.
+* Extract all experimentally tested amino-acid mutation–phenotype relationships in the Results text that are relevant to mammalian host adaptation.
+* Exclude background claims, findings from previous studies, predicted or inferred effects, mutations with no observed effect, and general virulence-only outcomes such as pathogenicity, mortality, morbidity, or weight loss.
+* Do not infer amino-acid changes from nucleotide changes or guess missing residues or positions.
+* Include every relevant mutation or mutation combination, not only the first or most detailed example.
+* Create one record for each unique mutation or mutation combination, phenotype, and experimental system.
+* If one experiment reports multiple relevant phenotypes for the same mutant, create one record per phenotype.
+* If mutations are tested together and the combined phenotype is reported, keep all mutations in one record. Split them only when individual effects are separately tested and reported.
+* Create separate records for different tested backbones, strains, subtypes, assays, cell types, animal models, receptor-binding systems, or temperatures.
+* Each record must represent only one system type: in vitro or ex vivo cells, in vivo animals, or receptor-binding substrates.
+* Extract: backbone, recombinants, subtype, proteins, mutations, phenotype, cell_type, animal_model, receptor_substrates, numbering, and temperature.
+* Put the full tested strain or viral backbone in backbone.
+* Put each recombinant strain and its tested protein in recombinants, such as A/WSN/1933(HA). Use a list when multiple recombinants are tested together.
+* Do not use abbreviated strain names for either backbone or recombinants. Use the full name stated in the text or the most complete available form. Do not use recombinant nicknames, use the official strain names only, unless not stated anywhere in the text
+* Put the influenza subtype in subtype, such as H1N1, H3N2, H5N1, or H7N9.
+* For reassortants, record the resulting HA/NA subtype only when both HA and NA origins are explicit.
+* Put the tested influenza proteins or segments in proteins, using a list when multiple proteins are involved.
+* Put mutations in a list using Protein format, such as ["PB2"] or ["HA", "NA"].
+* Do not use three-letter notation such as Asp111Glu.
+* Format deletions as Protein:X111- and insertions as Protein:-111Y.
+* Put only the core experimentally observed host-adaptation effect in phenotype. 
+* Use cell_type only for in vitro or ex vivo systems, animal_model only for in vivo systems, and receptor_substrates only for receptors, glycans, or receptor analogs used in binding assays.
+* Include the specific cell type, animal strain or lineage, or receptor substrate when stated.
+* Use numbering only for explicitly stated HA or NA numbering schemes; otherwise use null.
+* Record temperature only when explicitly stated and treat each tested temperature as a separate experiment.
+* Use null for every unsupported scalar or list field.
+* Do not create duplicate records.
 - Extract ONLY what is supported by the text below.
 
 
 SOURCE USAGE RULES:
 - Use the RESULTS TEXT section as the only source for mutation-phenotype claims.
-- Use the METHODS TEXT section to fill experimental context fields such as strain/backbone, subtype, cell_type, animal_model, receptor_substrates, experimental system, or HA/NA numbering.
+- Use the METHODS TEXT section to fill experimental context fields that were not explicitly stated in the RESULTS TEXT, such as strain/backbone, recombinant, subtype, cell_type, animal_model, receptor_substrates, experimental system, temperature, or HA/NA numbering.
 - Do not create a mutation record from METHODS TEXT or alone.
-- Do not add a phenotype from METHODS TEXT unless the same phenotype claim is supported in RESULTS TEXT.
-- If METHODS TEXT or conflicts with RESULTS TEXT, keep the mutation and phenotype claim grounded in RESULTS TEXT and use METHODS TEXT only for clearly matching experimental context.
+- Do not add a phenotype from METHODS TEXT.
+- If METHODS TEXT conflicts with RESULTS TEXT, keep the mutation and phenotype claim grounded in RESULTS TEXT and use METHODS TEXT only for clearly matching experimental context.
 
 --- SOURCE TEXT ---
 {content}
@@ -481,7 +470,8 @@ def save_outputs(rows: list[dict[str, Any]], output_csv: Path, output_json: Path
         "cell_type",
         "animal_model",
         "receptor_substrates",
-        "numbering"
+        "numbering",
+        "temperature",
     ]
     df = pd.DataFrame(rows, columns=columns)
     df.to_csv(output_csv, index=False)
