@@ -13,6 +13,10 @@ env/
 .env
 .env.*
 
+# azure openai config files
+openai_config.json
+openai_config_fallback.json
+
 # Secrets and local credentials
 *.key
 *.pem
