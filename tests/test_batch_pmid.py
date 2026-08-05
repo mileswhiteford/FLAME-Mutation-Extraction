@@ -4,6 +4,7 @@ from batch_pmid import (
     extract_results_passages,
     is_methods_source_passage,
     is_results_source_passage,
+    load_pmids_from_source,
     normalize_pmid_token,
     ordered_unique_pmids,
     split_pmid_cell,
@@ -40,6 +41,22 @@ class PmidParsingTests(unittest.TestCase):
             ordered_unique_pmids(["2.3750226E7", "23077313, 23750226", None]),
             ["23750226", "23077313"],
         )
+
+    def test_load_pmids_from_direct_values(self):
+        pmids, metadata = load_pmids_from_source(
+            ["23077313, 23750226", "2.3750226E7"],
+            sheet_path="ignored.xlsx",
+        )
+
+        self.assertEqual(pmids, ["23077313", "23750226"])
+        self.assertEqual(
+            metadata,
+            {"source_pmids": "23077313, 23750226, 2.3750226E7"},
+        )
+
+    def test_load_pmids_from_direct_values_rejects_invalid_values(self):
+        with self.assertRaisesRegex(ValueError, "No valid PMIDs"):
+            load_pmids_from_source(["not-a-pmid"], sheet_path="ignored.xlsx")
 
 
 class ResultsExtractionTests(unittest.TestCase):
