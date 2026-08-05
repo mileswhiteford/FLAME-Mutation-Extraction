@@ -1,5 +1,5 @@
-## FLAME: FLu Atlas of Mutation Effects
-# Mutation Extraction Pipeline
+# FLAME: FLu Atlas of Mutation Effects
+## Mutation Extraction Pipeline
 
 This repository contains a literature-mining pipeline for extracting experimentally tested influenza A mutation-phenotype-experimental context relationships relevant to mammalian host adaptation. The pipeline retrieves PMC BioC article text, isolates Results and Methods passages, sends the source text along with a prompt to an Azure OpenAI GPT deployment, validates structured outputs with Instructor and Pydantic, and writes mutation records to CSV and JSON.
 
