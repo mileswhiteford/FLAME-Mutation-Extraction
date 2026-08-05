@@ -86,20 +86,6 @@ def load_pmids(sheet_path: Path, pmid_column: str = "PMID") -> list[str]:
     return ordered_unique_pmids(sheet[pmid_column].tolist())
 
 
-def load_pmids_from_source(
-    pmid_values: list[str] | None,
-    sheet_path: Path,
-) -> tuple[list[str], dict[str, str]]:
-    if pmid_values:
-        pmids = ordered_unique_pmids(pmid_values)
-        if not pmids:
-            raise ValueError("No valid PMIDs were provided with --pmid.")
-        return pmids, {"source_pmids": ", ".join(pmid_values)}
-
-    pmids = load_pmids(sheet_path)
-    return pmids, {"source_sheet": str(sheet_path)}
-
-
 def save_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -127,6 +113,8 @@ def fetch_bioc_json(
         response = requests.get(url, timeout=timeout)
         if response.status_code == 404:
             return None, "not_found"
+        if response.status_code == 429:
+            return None, "rate_limited"
         response.raise_for_status()
         if "No result can be found" in response.text:
             return None, "not_found"
@@ -257,7 +245,6 @@ def extract_results_passages(pmid: str, payload: Any) -> dict[str, Any]:
 def run_pipeline(
     sheet_path: Path,
     out_dir: Path,
-    pmid_values: list[str] | None = None,
     limit: int | None = None,
     timeout: float = 30.0,
     sleep_seconds: float = 0.2,
@@ -266,21 +253,21 @@ def run_pipeline(
     raw_dir = out_dir / "raw_bioc"
     passages_dir = out_dir / "passages"
 
-    pmids, source_metadata = load_pmids_from_source(pmid_values, sheet_path)
+    pmids = load_pmids(sheet_path)
     if limit is not None:
         pmids = pmids[:limit]
 
     save_json(
         out_dir / "pmids.json",
         {
-            **source_metadata,
+            "source_sheet": str(sheet_path),
             "pmid_count": len(pmids),
             "pmids": pmids,
         },
     )
 
     report: dict[str, Any] = {
-        **source_metadata,
+        "source_sheet": str(sheet_path),
         "attempted_count": len(pmids),
         "successes": [],
         "unavailable_pmids": [],
@@ -329,15 +316,6 @@ def parse_args() -> argparse.Namespace:
         description="Fetch PMC BioC articles by PMID and save Results plus Methods passages."
     )
     parser.add_argument(
-        "--pmid",
-        action="append",
-        default=None,
-        help=(
-            "PMID to fetch directly. Can be repeated, or contain comma/semicolon "
-            "separated PMIDs. When supplied, --sheet is ignored."
-        ),
-    )
-    parser.add_argument(
         "--sheet",
         type=Path,
         help="Path to the curated workbook containing a PMID column.",
@@ -379,7 +357,6 @@ def main() -> None:
     report = run_pipeline(
         sheet_path=args.sheet,
         out_dir=args.out_dir,
-        pmid_values=args.pmid,
         limit=args.limit,
         timeout=args.timeout,
         sleep_seconds=args.sleep,

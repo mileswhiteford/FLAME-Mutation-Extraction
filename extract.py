@@ -8,6 +8,7 @@ from typing import Any
 
 import instructor
 import pandas as pd
+from batch_pmid import extract_results_passages, fetch_bioc_json, save_json
 from openai import AzureOpenAI
 from pydantic import BaseModel, Field
 
@@ -309,6 +310,33 @@ def default_passage_path(pmid: str) -> Path:
     return Path("data") / "passages" / f"{pmid}.json"
 
 
+def ensure_default_passage_file(pmid: str) -> Path:
+    passage_file = default_passage_path(pmid)
+    if passage_file.exists():
+        return passage_file
+
+    raw_dir = passage_file.parent.parent / "raw_bioc"
+    print(f"Fetching PMC BioC passages for PMID {pmid}")
+    payload, error = fetch_bioc_json(pmid, raw_dir, timeout=30.0)
+    if error:
+        if error == "not_found":
+            raise RuntimeError(
+                f"PMC BioC did not return full-text passages for PMID {pmid}. "
+                "This PMID cannot be processed automatically."
+            )
+        if error == "rate_limited":
+            raise RuntimeError(
+                "PMC BioC rate limited the request. Wait a minute and rerun "
+                "the same command."
+            )
+        raise RuntimeError(f"Could not fetch PMC BioC JSON for PMID {pmid}: {error}")
+
+    extracted = extract_results_passages(pmid, payload)
+    save_json(passage_file, extracted)
+    print(f"Saved passage file: {passage_file}")
+    return passage_file
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract influenza mutation-phenotype records from Results plus Methods context."
@@ -335,12 +363,6 @@ def parse_args() -> argparse.Namespace:
         "--pmid",
         default="23750226",
         help="PMID to extract from data/passages/{pmid}.json.",
-    )
-    parser.add_argument(
-        "--passage-file",
-        type=Path,
-        default=None,
-        help="Optional explicit passage JSON file. Overrides --pmid path lookup.",
     )
     parser.add_argument(
         "--deployment",
@@ -383,7 +405,7 @@ def main() -> None:
     deployment = deployment_from_config(config, args.deployment)
     temperature = optional_float_config(config, "temperature")
 
-    passage_file = args.passage_file or default_passage_path(args.pmid)
+    passage_file = ensure_default_passage_file(args.pmid)
     output_csv = args.output_csv or (
         Path("data") / "extractions" / f"{args.pmid}_mutations.csv"
     )
@@ -473,7 +495,9 @@ def main() -> None:
                 "but no distinct fallback deployment was available: "
                 f"{args.fallback_config}"
             )
-        raise
+            raise
+        else:
+            raise
 
     print(f"Extracted {len(rows)} mutation records for PMID {source_pmid}")
     if used_fallback:

@@ -1,15 +1,21 @@
+import contextlib
+import io
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
+import extract
 from batch_pmid import (
     extract_results_passages,
     is_methods_source_passage,
     is_results_source_passage,
-    load_pmids_from_source,
     normalize_pmid_token,
     ordered_unique_pmids,
     split_pmid_cell,
 )
-from extract import is_content_block_error, optional_float_config
+from extract import ensure_default_passage_file, is_content_block_error, optional_float_config
 
 
 class PmidParsingTests(unittest.TestCase):
@@ -41,23 +47,6 @@ class PmidParsingTests(unittest.TestCase):
             ordered_unique_pmids(["2.3750226E7", "23077313, 23750226", None]),
             ["23750226", "23077313"],
         )
-
-    def test_load_pmids_from_direct_values(self):
-        pmids, metadata = load_pmids_from_source(
-            ["23077313, 23750226", "2.3750226E7"],
-            sheet_path="ignored.xlsx",
-        )
-
-        self.assertEqual(pmids, ["23077313", "23750226"])
-        self.assertEqual(
-            metadata,
-            {"source_pmids": "23077313, 23750226, 2.3750226E7"},
-        )
-
-    def test_load_pmids_from_direct_values_rejects_invalid_values(self):
-        with self.assertRaisesRegex(ValueError, "No valid PMIDs"):
-            load_pmids_from_source(["not-a-pmid"], sheet_path="ignored.xlsx")
-
 
 class ResultsExtractionTests(unittest.TestCase):
     def test_extracts_only_results_passages(self):
@@ -179,6 +168,68 @@ class ExtractFallbackTests(unittest.TestCase):
     def test_optional_float_config(self):
         self.assertEqual(optional_float_config({"temperature": "0.0"}, "temperature"), 0.0)
         self.assertIsNone(optional_float_config({}, "temperature"))
+
+
+class ExtractPassageFetchTests(unittest.TestCase):
+    def test_uses_existing_default_passage_file(self):
+        original_fetch = extract.fetch_bioc_json
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_cwd = os.getcwd()
+            os.chdir(tmp_dir)
+            try:
+                passage_file = Path("data") / "passages" / "12345.json"
+                passage_file.parent.mkdir(parents=True)
+                passage_file.write_text('{"pmid": "12345"}', encoding="utf-8")
+
+                def fail_fetch(*args, **kwargs):
+                    self.fail("Existing passage file should not be fetched again")
+
+                extract.fetch_bioc_json = fail_fetch
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(ensure_default_passage_file("12345"), passage_file)
+            finally:
+                extract.fetch_bioc_json = original_fetch
+                os.chdir(original_cwd)
+
+    def test_fetches_missing_default_passage_file(self):
+        original_fetch = extract.fetch_bioc_json
+        payload = [
+            {
+                "documents": [
+                    {
+                        "id": "PMC123",
+                        "passages": [
+                            {
+                                "offset": 1,
+                                "infons": {
+                                    "section_type": "RESULTS",
+                                    "type": "paragraph",
+                                    "section": "Results",
+                                },
+                                "text": "Results text",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_cwd = os.getcwd()
+            os.chdir(tmp_dir)
+            try:
+                extract.fetch_bioc_json = lambda *args, **kwargs: (payload, None)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    passage_file = ensure_default_passage_file("12345")
+
+                saved = json.loads(passage_file.read_text(encoding="utf-8"))
+                self.assertEqual(passage_file, Path("data") / "passages" / "12345.json")
+                self.assertEqual(saved["pmid"], "12345")
+                self.assertEqual(saved["passage_count"], 1)
+                self.assertEqual(saved["combined_results_text"], "Results text")
+            finally:
+                extract.fetch_bioc_json = original_fetch
+                os.chdir(original_cwd)
 
 
 if __name__ == "__main__":
