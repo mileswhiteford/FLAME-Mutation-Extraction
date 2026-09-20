@@ -1,7 +1,7 @@
 # FLAME: FLu Atlas of Mutation Effects
 ## Mutation Extraction Pipeline
 
-This repository contains a literature-mining pipeline for extracting experimentally tested influenza A mutation-phenotype-experimental context relationships relevant to mammalian host adaptation. The pipeline retrieves PMC BioC article text, isolates Results and Methods passages, sends the source text along with a prompt to an Azure OpenAI GPT deployment, validates structured outputs with Instructor and Pydantic, and writes mutation records to CSV and JSON.
+This repository contains a literature-mining pipeline for extracting experimentally tested influenza A mutation-phenotype-experimental context relationships relevant to mammalian host adaptation. The pipeline retrieves PMC BioC article text, isolates Results and Methods passages, sends the source text along with a prompt to an OpenAI-compatible proxy via the Responses API, validates structured outputs with Instructor and Pydantic, and writes mutation records to CSV and JSON.
 
 ## Overview
 
@@ -33,27 +33,26 @@ pip install -r requirements.txt
 
 ## Configuration
 
-`extract.py` expects Azure OpenAI credentials and deployment information from `openai_config.json` by default. You can also pass a different config file with `--config`.
+`extract.py` loads `.env` automatically. Set your proxy URL and function host key:
+
+```dotenv
+PROXY_BASE_URL=https://YOUR_PROXY_HOST/api
+FUNCTION_HOST_KEY=YOUR_FUNCTION_HOST_KEY
+```
+
+Use the same base URL as in your working proxy example; the SDK appends `/responses`. Authentication uses the `x-functions-key` header. No Azure endpoint, API version, deployment name, or OpenAI API key is required. The model defaults to `gpt-4o-mini`; use `--model` to change it.
+
+Optional model settings can go in `openai_config.json` or another JSON file passed with `--config`. `--model` overrides the model in that file. Credentials are always read from the environment, including for the fallback model.
 
 Example config shape:
 
 ```json
 {
-  "subscription_key": "YOUR_AZURE_OPENAI_KEY",
-  "endpoint_url": "https://YOUR_RESOURCE.openai.azure.com/",
-  "api_version": "YOUR_API_VERSION",
-  "deployment": "YOUR_DEPLOYMENT_NAME",
-  "temperature": 0.0
+  "model": "gpt-4o-mini"
 }
 ```
 
-Supported credential environment variables include:
-
-- `AZURE_OPENAI_API_KEY`
-- `AZURE_OPENAI_ENDPOINT`
-- `AZURE_OPENAI_API_VERSION`
-- `AZURE_OPENAI_DEPLOYMENT`
-- `AZURE_OPENAI_DEPLOYMENT_NAME`
+You may set `temperature` in the JSON config. Reasoning effort is omitted by default for `gpt-4o-mini`. Existing Azure config files must be updated to the new keys.
 
 Do not commit real API keys or local credential files.
 
@@ -92,12 +91,12 @@ If PMC BioC rate limits the request, wait briefly and rerun the same command. If
 
 Useful options:
 
-- `--config`: Azure OpenAI config path. Defaults to `openai_config.json`.
-- `--fallback-config`: Optional fallback config (preferably to a smaller model) used after content-filter blocks. Defaults to `openai_config_fallback.json`.
-- `--deployment`: Override the deployment name from the config file.
+- `--config`: Optional model settings config path. Defaults to `openai_config.json`.
+- `--fallback-config`: Optional model settings used after content-filter blocks. Defaults to `openai_config_fallback.json`. The fallback model defaults to `o3-mini`, including when the file is absent; set `model` in this file to override it.
+- `--model`: Override the model from the config file. Defaults to `gpt-4o-mini`.
 - `--output-csv`: Custom CSV output path.
 - `--output-json`: Custom JSON output path.
-- `--reasoning-effort`: GPT reasoning effort: `none`, `low`, `medium`, or `high`. Defaults to `low`.
+- `--reasoning-effort`: GPT reasoning effort: `none`, `low`, `medium`, or `high`. Defaults to `none` (omits the parameter).
 - `--max-retries`: Instructor retry count for schema validation failures. Defaults to `2`.
 
 ## Output Fields
@@ -130,7 +129,7 @@ The extraction schema is defined in `extract.py` using Pydantic models:
 - `Mutation`: One experimentally tested mutation-phenotype relationship.
 - `ExtractionSchema`: A list of `Mutation` records.
 
-Instructor wraps the Azure OpenAI chat-completion call, requests an `ExtractionSchema` response, validates the model response with Pydantic, and retries invalid responses when possible. The final validated object is flattened into tabular rows before export.
+Instructor wraps the OpenAI Responses API call through your proxy, requests an `ExtractionSchema` response using function tools, validates the model response with Pydantic, and retries invalid responses when possible. The proxy must forward Responses API tool parameters and tool-call outputs. The final validated object is flattened into tabular rows before export.
 
 ## Tests
 
@@ -151,4 +150,4 @@ Current tests cover PMID parsing, BioC passage filtering, content-filter error d
 
 ## Citation Notes
 
-Relevant tools and resources used by this pipeline include PMC BioC, Azure OpenAI, Instructor, Pydantic, pandas, and requests.
+Relevant tools and resources used by this pipeline include PMC BioC, OpenAI, Instructor, Pydantic, pandas, and requests.

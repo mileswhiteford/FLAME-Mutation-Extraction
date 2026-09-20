@@ -9,7 +9,8 @@ from typing import Any
 import instructor
 import pandas as pd
 from batch_pmid import extract_results_passages, fetch_bioc_json, save_json
-from openai import AzureOpenAI
+from dotenv import load_dotenv
+from openai import OpenAI
 from pydantic import BaseModel, Field
 
 
@@ -96,61 +97,8 @@ def load_config(config_path: Path | None) -> dict[str, Any]:
         return json.load(handle)
 
 
-def config_value(
-    config: dict[str, Any],
-    keys: list[str],
-    env_names: list[str],
-    label: str,
-) -> str:
-    for key in keys:
-        value = config.get(key)
-        if value:
-            return str(value)
-
-    for env_name in env_names:
-        value = os.getenv(env_name)
-        if value:
-            return value
-
-    raise RuntimeError(
-        f"Missing {label}. Add one of {keys} to your config JSON "
-        f"or set one of {env_names}."
-    )
-
-
-def create_client(config: dict[str, Any]) -> instructor.Instructor:
-    azure_client = AzureOpenAI(
-        api_key=config_value(
-            config,
-            ["api_key", "subscription_key", "azure_openai_api_key"],
-            ["AZURE_OPENAI_API_KEY"],
-            "Azure OpenAI API key",
-        ),
-        azure_endpoint=config_value(
-            config,
-            ["endpoint", "endpoint_url", "azure_endpoint", "azure_openai_endpoint"],
-            ["AZURE_OPENAI_ENDPOINT"],
-            "Azure OpenAI endpoint",
-        ),
-        api_version=config_value(
-            config,
-            ["api_version", "azure_openai_api_version"],
-            ["AZURE_OPENAI_API_VERSION"],
-            "Azure OpenAI API version",
-        ),
-    )
-    return instructor.from_openai(azure_client, mode=instructor.Mode.TOOLS_STRICT)
-
-
-def deployment_from_config(config: dict[str, Any], cli_deployment: str | None) -> str:
-    if cli_deployment:
-        return cli_deployment
-    return config_value(
-        config,
-        ["deployment", "deployment_name", "azure_openai_deployment"],
-        ["AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT_NAME"],
-        "Azure OpenAI deployment",
-    )
+def model_from_config(config: dict[str, Any], cli_model: str | None) -> str:
+    return str(cli_model or config.get("model") or "gpt-4o-mini")
 
 
 def load_passage_payload(path: Path) -> dict[str, Any]:
@@ -242,7 +190,7 @@ def is_content_block_error(error: Exception) -> bool:
 
 def extract_from_text(
     client: instructor.Instructor,
-    deployment: str,
+    model: str,
     content: str,
     max_retries: int,
     reasoning_effort: str | None,
@@ -250,15 +198,15 @@ def extract_from_text(
 ) -> ExtractionSchema:
     kwargs: dict[str, Any] = {}
     if reasoning_effort:
-        kwargs["reasoning_effort"] = reasoning_effort
+        kwargs["reasoning"] = {"effort": reasoning_effort}
     if temperature is not None:
         kwargs["temperature"] = temperature
 
-    return client.chat.completions.create(
-        model=deployment,
+    return client.responses.create(
+        model=model,
         max_retries=max_retries,
         response_model=ExtractionSchema,
-        messages=[
+        input=[
             {
                 "role": "user",
                 "content": PROMPT_TEMPLATE.format(content=content),
@@ -346,8 +294,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("openai_config.json"),
         help=(
-            "Path to Azure OpenAI config JSON. Defaults to openai_config.json. "
-            "Expected keys: subscription_key, endpoint_url, api_version, deployment."
+            "Path to model settings JSON. Defaults to openai_config.json. "
+            "Optional keys: model, temperature."
         ),
     )
     parser.add_argument(
@@ -355,8 +303,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("openai_config_fallback.json"),
         help=(
-            "Fallback Azure OpenAI config used only when the primary request is "
-            "blocked by a content filter. Defaults to openai_config_fallback.json."
+            "Fallback model config used only when the primary request is "
+            "blocked by a content filter. Defaults to openai_config_fallback.json; "
+            "the fallback model defaults to o3-mini."
         ),
     )
     parser.add_argument(
@@ -365,9 +314,9 @@ def parse_args() -> argparse.Namespace:
         help="PMID to extract from data/passages/{pmid}.json.",
     )
     parser.add_argument(
-        "--deployment",
+        "--model",
         default=None,
-        help="Azure OpenAI deployment name. Overrides the config JSON value.",
+        help="Model name. Overrides config; defaults to gpt-4o-mini.",
     )
     parser.add_argument(
         "--output-csv",
@@ -384,9 +333,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reasoning-effort",
         choices=["none", "low", "medium", "high"],
-        default="low",
+        default="none",
         help=(
-            "Azure GPT-5 reasoning effort. Use none to omit the parameter."
+            "Model reasoning effort. Use none to omit the parameter."
         ),
     )
     parser.add_argument(
@@ -399,10 +348,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    load_dotenv()
     args = parse_args()
     config_path = args.config if args.config.exists() else None
     config = load_config(config_path)
-    deployment = deployment_from_config(config, args.deployment)
+    model = model_from_config(config, args.model)
     temperature = optional_float_config(config, "temperature")
 
     passage_file = ensure_default_passage_file(args.pmid)
@@ -432,18 +382,25 @@ def main() -> None:
     print(f"Methods characters available: {methods_chars}")
     print(f"Characters sent to model: {len(content)}")
 
-    client = create_client(config)
+    client = instructor.from_openai(
+        OpenAI(
+            base_url=os.environ["PROXY_BASE_URL"].rstrip("/"),
+            api_key="unused",  # Authentication is via x-functions-key.
+            default_headers={"x-functions-key": os.environ["FUNCTION_HOST_KEY"]},
+        ),
+        mode=instructor.Mode.RESPONSES_TOOLS,
+    )
     reasoning_effort = (
         None if args.reasoning_effort == "none" else args.reasoning_effort
     )
-    final_deployment = deployment
+    final_model = model
     used_fallback = False
 
     rows: list[dict[str, Any]] = []
     try:
         extraction = extract_from_text(
             client=client,
-            deployment=deployment,
+            model=model,
             content=content,
             max_retries=args.max_retries,
             reasoning_effort=reasoning_effort,
@@ -453,30 +410,30 @@ def main() -> None:
         save_outputs(rows, output_csv, output_json)
     except Exception as exc:
         content_blocked = is_content_block_error(exc)
-        fallback_config = None
-        fallback_deployment = None
-        if content_blocked and args.fallback_config.exists():
-            fallback_config = load_config(args.fallback_config)
-            fallback_deployment = deployment_from_config(fallback_config, None)
+        fallback_config = {}
+        fallback_model = None
+        if content_blocked:
+            if args.fallback_config.exists():
+                fallback_config = load_config(args.fallback_config)
+            fallback_model = str(fallback_config.get("model") or "o3-mini")
 
-        if content_blocked and fallback_config and fallback_deployment != deployment:
+        if content_blocked and fallback_model != model:
             print(
-                "WARNING: Primary deployment was blocked by content filtering: "
-                f"{deployment}"
+                "WARNING: Primary model was blocked by content filtering: "
+                f"{model}"
             )
             print(
-                "WARNING: Retrying once with fallback config: "
-                f"{args.fallback_config}"
+                "WARNING: Retrying once with fallback model: "
+                f"{fallback_model}"
             )
 
             fallback_temperature = optional_float_config(
                 fallback_config, "temperature"
             )
-            fallback_client = create_client(fallback_config)
             try:
                 extraction = extract_from_text(
-                    client=fallback_client,
-                    deployment=fallback_deployment,
+                    client=client,
+                    model=fallback_model,
                     content=content,
                     max_retries=args.max_retries,
                     reasoning_effort=None,
@@ -487,12 +444,12 @@ def main() -> None:
             except Exception:
                 raise
 
-            final_deployment = fallback_deployment
+            final_model = fallback_model
             used_fallback = True
         elif content_blocked:
             print(
-                "WARNING: Primary deployment was blocked by content filtering, "
-                "but no distinct fallback deployment was available: "
+                "WARNING: Primary model was blocked by content filtering, "
+                "but no distinct fallback model was available: "
                 f"{args.fallback_config}"
             )
             raise
@@ -502,13 +459,13 @@ def main() -> None:
     print(f"Extracted {len(rows)} mutation records for PMID {source_pmid}")
     if used_fallback:
         print(
-            "WARNING: Final output was generated with fallback deployment: "
-            f"{final_deployment}"
+            "WARNING: Final output was generated with fallback model: "
+            f"{final_model}"
         )
     else:
         print(
-            "Final output was generated with primary deployment: "
-            f"{final_deployment}"
+            "Final output was generated with primary model: "
+            f"{final_model}"
         )
     print(f"CSV: {output_csv}")
     print(f"JSON: {output_json}")

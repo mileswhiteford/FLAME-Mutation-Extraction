@@ -1,5 +1,6 @@
 pandas
 openpyxl
 requests
-instructor
+instructor>=1.17.0
 openai
+python-dotenv

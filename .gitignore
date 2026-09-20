@@ -13,7 +13,7 @@ env/
 .env
 .env.*
 
-# azure openai config files
+# Local proxy config files
 openai_config.json
 openai_config_fallback.json
 
