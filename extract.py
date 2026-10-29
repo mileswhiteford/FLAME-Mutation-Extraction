@@ -1,3 +1,5 @@
+"""Extract influenza host-adaptation mutation records from a paper's Results/Methods text using an LLM."""
+
 from __future__ import annotations
 
 import argparse
@@ -15,6 +17,7 @@ from pydantic import BaseModel, Field
 
 
 class Mutation(BaseModel):
+    """Mutation Field Schema"""
     backbone: str | None = Field(
         description="Virus strain/backbone experimentally tested")
     recombinants: list[str] | None = Field(
@@ -38,7 +41,9 @@ class Mutation(BaseModel):
     temperature: str | None = Field(
         description="Temperature of the experiment in the experimental system context, only if explicitly stated in the text. If not specified, use null.")
 
+
 class ExtractionSchema(BaseModel):
+    """LLM response format: all mutation records found in a paper."""
     mutation_records: list[Mutation] = Field(
         description=(
             "Every distinct experimentally tested mutation-phenotype relationship related to host adaptation in the source text"
@@ -46,11 +51,13 @@ class ExtractionSchema(BaseModel):
     )
 
 
+# Extraction instructions sent to the model; {content} is filled with the paper text.
 PROMPT_TEMPLATE = """You are extracting experimentally tested influenza mutation-phenotype relationships from a research paper.
 
 MUTATION EXTRACTION RULES:
 * Extract all experimentally tested amino-acid mutation–phenotype relationships in the Results text that are relevant to mammalian host adaptation.
 * Exclude background claims, findings from previous studies, predicted or inferred effects, mutations with no observed effect, and general virulence-only outcomes such as pathogenicity, mortality, morbidity, or weight loss.
+* Exclude all mutations related to antibody, drug, or vaccine resistance.
 * Do not infer amino-acid changes from nucleotide changes or guess missing residues or positions.
 * Include every relevant mutation or mutation combination, not only the first or most detailed example.
 * Create one record for each unique mutation or mutation combination, phenotype, and experimental system.
@@ -91,6 +98,7 @@ SOURCE USAGE RULES:
 
 
 def load_config(config_path: Path | None) -> dict[str, Any]:
+    """Load model settings from JSON"""
     if config_path is None:
         return {}
     with config_path.open("r", encoding="utf-8") as handle:
@@ -98,15 +106,18 @@ def load_config(config_path: Path | None) -> dict[str, Any]:
 
 
 def model_from_config(config: dict[str, Any], cli_model: str | None) -> str:
-    return str(cli_model or config.get("model") or "gpt-4o-mini")
+    """Get the model name from model settings"""
+    return str(cli_model or config.get("model") or "gpt-5-mini")
 
 
 def load_passage_payload(path: Path) -> dict[str, Any]:
+    """Load saved passages from JSON file."""
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
 def pmcid_from_passage_payload(payload: dict[str, Any]) -> str | None:
+    """Return the first PMC ID found in the documents or passages, if any."""
     for document in payload.get("documents", []):
         pmcid = document.get("pmc_id")
         if pmcid:
@@ -125,6 +136,7 @@ def combined_section_text(
     combined_key: str,
     passages_key: str,
 ) -> str:
+    """Get a section's combined text, or join its passages if none is stored."""
     text = payload.get(combined_key)
     if text:
         return str(text).strip()
@@ -137,6 +149,7 @@ def combined_section_text(
 
 
 def source_text_from_passage_payload(payload: dict[str, Any]) -> str:
+    """Build the model input from Results and Methods sections."""
     results_text = combined_section_text(
         payload, "combined_results_text", "passages"
     )
@@ -152,10 +165,12 @@ def source_text_from_passage_payload(payload: dict[str, Any]) -> str:
 
 
 def source_text_from_passage_file(path: Path) -> str:
+    """Build the model input directly from a passage file."""
     return source_text_from_passage_payload(load_passage_payload(path))
 
 
 def optional_float_config(config: dict[str, Any], key: str) -> float | None:
+    """Read a numeric setting (e.g. temperature) from config; None if not set."""
     value = config.get(key)
     if value in (None, ""):
         return None
@@ -163,6 +178,7 @@ def optional_float_config(config: dict[str, Any], key: str) -> float | None:
 
 
 def is_content_block_error(error: Exception) -> bool:
+    """Catch whether an API error was caused by a content/safety filter."""
     text = str(error).lower()
     block_indicators = [
         "content_filter",
@@ -196,6 +212,7 @@ def extract_from_text(
     reasoning_effort: str | None,
     temperature: float | None,
 ) -> ExtractionSchema:
+    """Send the paper text to the model and return the parsed mutation records."""
     kwargs: dict[str, Any] = {}
     if reasoning_effort:
         kwargs["reasoning"] = {"effort": reasoning_effort}
@@ -219,6 +236,7 @@ def extract_from_text(
 def extraction_rows(
     pmid: str, pmcid: str | None, extraction: ExtractionSchema
 ) -> list[dict[str, Any]]:
+    """Flatten extracted records into rows tagged with the PMID and PMCID."""
     rows = []
     for record in extraction.mutation_records:
         row = {"pmid": pmid, "pmcid": pmcid}
@@ -228,6 +246,7 @@ def extraction_rows(
 
 
 def save_outputs(rows: list[dict[str, Any]], output_csv: Path, output_json: Path) -> None:
+    """Write the extracted rows to both CSV and JSON."""
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     output_json.parent.mkdir(parents=True, exist_ok=True)
 
@@ -255,10 +274,12 @@ def save_outputs(rows: list[dict[str, Any]], output_csv: Path, output_json: Path
 
 
 def default_passage_path(pmid: str) -> Path:
+    """Standard location of a PMID's passage file."""
     return Path("data") / "passages" / f"{pmid}.json"
 
 
 def ensure_default_passage_file(pmid: str) -> Path:
+    """Return the local passage file for a PMID, downloading the paper from PubMed Central first if needed."""
     passage_file = default_passage_path(pmid)
     if passage_file.exists():
         return passage_file
@@ -286,6 +307,7 @@ def ensure_default_passage_file(pmid: str) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
+    """Define and parse command-line options."""
     parser = argparse.ArgumentParser(
         description="Extract influenza mutation-phenotype records from Results plus Methods context."
     )
@@ -316,7 +338,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=None,
-        help="Model name. Overrides config; defaults to gpt-4o-mini.",
+        help="Model name. Overrides config; defaults to gpt-5-mini.",
     )
     parser.add_argument(
         "--output-csv",
@@ -348,6 +370,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Load the paper for a PMID, run extraction, and save the results."""
     load_dotenv()
     args = parse_args()
     config_path = args.config if args.config.exists() else None
@@ -409,6 +432,7 @@ def main() -> None:
         rows = extraction_rows(source_pmid, source_pmcid, extraction)
         save_outputs(rows, output_csv, output_json)
     except Exception as exc:
+        # If the primary model was blocked by a content filter, retry once with a fallback model.
         content_blocked = is_content_block_error(exc)
         fallback_config = {}
         fallback_model = None

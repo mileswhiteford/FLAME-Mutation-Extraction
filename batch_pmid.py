@@ -1,3 +1,5 @@
+"""Download papers from PubMed Central by PMID and save their Results and Methods passages."""
+
 from __future__ import annotations
 
 import argparse
@@ -12,10 +14,12 @@ import pandas as pd
 import requests
 
 
+# PubMed Central API that returns a paper's full text as JSON.
 BIOC_API_TEMPLATE = (
     "https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/"
     "BioC_json/{pmid}/unicode"
 )
+# Section names to extract.
 RESULTS_SECTION_TYPE = "RESULTS"
 METHODS_SECTION_TYPE = "METHODS"
 FIGURE_SECTION_TYPE = "FIG"
@@ -51,6 +55,7 @@ def normalize_pmid_token(token: Any) -> str | None:
 
 
 def split_pmid_cell(cell_value: Any) -> list[str]:
+    """Split a spreadsheet cell that may hold several PMIDs separated by ; or ,."""
     if cell_value is None:
         return []
 
@@ -64,6 +69,7 @@ def split_pmid_cell(cell_value: Any) -> list[str]:
 
 
 def ordered_unique_pmids(cell_values: list[Any]) -> list[str]:
+    """Collect PMIDs from all cells, dropping duplicates but keeping order."""
     seen: set[str] = set()
     pmids: list[str] = []
     for cell_value in cell_values:
@@ -75,6 +81,7 @@ def ordered_unique_pmids(cell_values: list[Any]) -> list[str]:
 
 
 def load_pmids(sheet_path: Path, pmid_column: str = "PMID") -> list[str]:
+    """Read the list of unique PMIDs from an Excel sheet's PMID column."""
     sheet = pd.read_excel(sheet_path)
     if pmid_column not in sheet.columns:
         available = ", ".join(str(column) for column in sheet.columns)
@@ -87,6 +94,7 @@ def load_pmids(sheet_path: Path, pmid_column: str = "PMID") -> list[str]:
 
 
 def save_json(path: Path, payload: Any) -> None:
+    """Write data to a JSON file"""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)
@@ -94,6 +102,7 @@ def save_json(path: Path, payload: Any) -> None:
 
 
 def load_json(path: Path) -> Any:
+    """Read a JSON file."""
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
@@ -104,6 +113,7 @@ def fetch_bioc_json(
     timeout: float,
     refresh: bool = False,
 ) -> tuple[Any | None, str | None]:
+    """Download a paper's full text (or reuse a saved copy)."""
     raw_path = raw_dir / f"{pmid}.json"
     if raw_path.exists() and not refresh:
         return load_json(raw_path), None
@@ -129,6 +139,7 @@ def fetch_bioc_json(
 
 
 def iter_bioc_documents(payload: Any) -> list[dict[str, Any]]:
+    """Get the list of documents out of a downloaded BioC response."""
     collections = payload if isinstance(payload, list) else [payload]
     documents: list[dict[str, Any]] = []
     for collection in collections:
@@ -141,10 +152,12 @@ def iter_bioc_documents(payload: Any) -> list[dict[str, Any]]:
 
 
 def normalized_section_label(value: Any) -> str:
+    """Normalize section heading."""
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
 def is_mixed_results_discussion_label(label: str) -> bool:
+    """Check for combined headings like "Results and Discussion"."""
     return bool(
         re.fullmatch(r"results?\s*/\s*discussion", label)
         or re.fullmatch(r"discussion\s*/\s*results?", label)
@@ -158,6 +171,7 @@ def is_results_source_passage(
     passage_type: Any,
     section_label: Any = None,
 ) -> bool:
+    """True if a passage is from the Results section (or is a figure caption)."""
     section_label_text = normalized_section_label(section_label)
     if section_type == RESULTS_SECTION_TYPE:
         return True
@@ -170,12 +184,14 @@ def is_results_source_passage(
 
 
 def is_methods_source_passage(section_type: str, section_label: Any = None) -> bool:
+    """True if a passage is from the Methods section."""
     if section_type == METHODS_SECTION_TYPE:
         return True
     return normalized_section_label(section_label) in METHODS_SECTION_LABELS
 
 
 def extract_results_passages(pmid: str, payload: Any) -> dict[str, Any]:
+    """Pull the Results and Methods passages out of a paper and combine their text."""
     documents = iter_bioc_documents(payload)
     extracted_documents: list[dict[str, Any]] = []
     results_passages: list[dict[str, Any]] = []
@@ -250,6 +266,7 @@ def run_pipeline(
     sleep_seconds: float = 0.2,
     refresh: bool = False,
 ) -> dict[str, Any]:
+    """Fetch and save passages for every PMID in the sheet, and write a run report."""
     raw_dir = out_dir / "raw_bioc"
     passages_dir = out_dir / "passages"
 
@@ -312,6 +329,7 @@ def run_pipeline(
 
 
 def parse_args() -> argparse.Namespace:
+    """Define and parse command-line options."""
     parser = argparse.ArgumentParser(
         description="Fetch PMC BioC articles by PMID and save Results plus Methods passages."
     )
@@ -353,6 +371,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the batch download and print a summary."""
     args = parse_args()
     report = run_pipeline(
         sheet_path=args.sheet,
